@@ -1,8 +1,25 @@
-use std::collections::HashMap;
-
-use timely::dataflow::{InputHandle, ProbeHandle, Scope, Stream};
-use timely::dataflow::operators::{Map, Operator, Inspect, Probe};
-use timely::dataflow::channels::pact::Exchange;
+//! Usage example:
+//!
+//! We spawn two worker processes in cluster mode, each with a single worker thread
+//! (each process must have the same number of worker threads):
+//!
+//! rescaling-examples $ cargo run --bin wordcount -- -n2 -w1 -p0
+//! rescaling-examples $ cargo run --bin wordcount -- -n2 -w1 -p1
+//!
+//! After a few seconds (it can be more but instructions are hardcoded
+//! and we need to spawn the 3rd worker process before the configuration update
+//! migrating state to the new worker is issued) we can spawn the 3rd worker process:
+//!
+//! cargo run --bin wordcount -- -n2 -w1 -p2 --join 0 --nn 3
+//!                              <----->
+//!                                 ^should always remain unchanged
+//!
+//! The arguments have the following semantic:
+//! --join 0 => join the cluster using worker with index 0 as the bootstrap server
+//! --nn 3   => the new number of worker in the cluster
+//!
+use timely::dataflow::{InputHandle, ProbeHandle};
+use timely::dataflow::operators::{Map, Inspect, Probe};
 use timely::dataflow::operators::aggregation::StateMachine;
 use dynamic_scaling_mechanism::state_machine::BinnedStateMachine;
 use std::hash::{Hash, Hasher};
@@ -11,9 +28,9 @@ use std::fs::File;
 use std::io::{BufReader, BufRead};
 use dynamic_scaling_mechanism::{Control, ControlInst, BinId, BIN_SHIFT};
 use timely::dataflow::operators::broadcast::Broadcast;
-use timely::ExchangeData;
-use timely::dataflow::operators::exchange::Exchange as FuckOff;
+use timely::dataflow::operators::exchange::Exchange;
 use colored::Colorize;
+use rescaling_examples::verify;
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut h = DefaultHasher::new();
@@ -67,14 +84,20 @@ fn main() {
             verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0)).probe_with(&mut verify_probe);
         });
 
+        // IMPORTANT: allow a worker joining the cluster to do its initialization.
+        // If the worker running this code:
+        //   - is not joining the cluster, this is a no-op and will return false.
+        //   - is joining the cluster, it will perform the bootstrapping protocol to initialize its state
+        //     and will return true. We return from the function (worker will run to completion) as it
+        //     should not inject any input.
         if worker.bootstrap() { return; }
 
         if worker.index() == 0 {
             let controls = vec![
                 vec![ControlInst::Move(BinId::new(0), 1), ControlInst::Move(BinId::new(1), 0)],
                 vec![ControlInst::None], // make sure new worker has correct map
-                // vec![ControlInst::Move(BinId::new(0), 2), ControlInst::Move(BinId::new(1), 2)],
-                vec![ControlInst::Map(vec![2; 1 << BIN_SHIFT])],
+                vec![ControlInst::Map(vec![2; 1 << BIN_SHIFT])], // Note: you should spawn the 3rd worker before this command is sent
+                (0..10).map(|bin| ControlInst::Move(BinId::new(bin), bin % 2)).collect::<Vec<_>>(),
             ];
             let mut controls =
                 controls
@@ -87,7 +110,7 @@ fn main() {
             let reader = BufReader::new(File::open("text/sample.txt").unwrap());
             let mut lines = reader.lines();
 
-            let batch_size = 10;
+            let batch_size = 5;
 
             let mut round = 0;
 
@@ -126,38 +149,5 @@ fn main() {
             }
         }
     }).unwrap();
-}
-
-fn verify<S: Scope, T: ExchangeData + Ord + ::std::fmt::Debug>(correct: &Stream<S, T>, output: &Stream<S, T>) -> Stream<S, ()> {
-    let mut in1_pending: HashMap<_, Vec<_>> = Default::default();
-    let mut in2_pending: HashMap<_, Vec<_>> = Default::default();
-    let mut data_buffer: Vec<T> = Vec::new();
-    correct.binary_notify(&output, Exchange::new(|_| 0), Exchange::new(|_| 0), "Verify", vec![],
-                          move |in1, in2, _out, not| {
-                              in1.for_each(|time, data| {
-                                  data.swap(&mut data_buffer);
-                                  in1_pending.entry(time.time().clone()).or_insert_with(Default::default).extend(data_buffer.drain(..));
-                                  not.notify_at(time.retain());
-                              });
-                              in2.for_each(|time, data| {
-                                  data.swap(&mut data_buffer);
-                                  in2_pending.entry(time.time().clone()).or_insert_with(Default::default).extend(data_buffer.drain(..));
-                                  not.notify_at(time.retain());
-                              });
-                              not.for_each(|time, _, _| {
-//                                  println!("comparing time {:?}\n\tin1 = {:?}\n\tin2 = {:?}", *time.time(), in1_pending, in2_pending);
-                                  let mut v1 = in1_pending.remove(time.time()).unwrap_or_default();
-                                  let mut v2 = in2_pending.remove(time.time()).unwrap_or_default();
-                                  v1.sort();
-                                  v2.sort();
-                                  assert_eq!(v1.len(), v2.len());
-                                  let i1 = v1.iter();
-                                  let i2 = v2.iter();
-                                  for (a, b) in i1.zip(i2) {
-                                      assert_eq!(a, b, " at {:?}", time.time());
-                                  }
-                              })
-                          },
-    )
 }
 
