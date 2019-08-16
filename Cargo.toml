@@ -1,5 +1,5 @@
 [package]
-name = "wordcount-rescaling"
+name = "rescaling-examples"
 version = "0.1.0"
 authors = ["Lorenzo Selvatici <selvatici.lorenzo@gmail.com>"]
 edition = "2018"

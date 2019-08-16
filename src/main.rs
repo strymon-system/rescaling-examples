@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::io::{BufReader, BufRead};
-use dynamic_scaling_mechanism::{Control, ControlInst, BinId};
+use dynamic_scaling_mechanism::{Control, ControlInst, BinId, BIN_SHIFT};
 use timely::dataflow::operators::broadcast::Broadcast;
 use timely::ExchangeData;
 use timely::dataflow::operators::exchange::Exchange as FuckOff;
@@ -72,7 +72,9 @@ fn main() {
         if worker.index() == 0 {
             let controls = vec![
                 vec![ControlInst::Move(BinId::new(0), 1), ControlInst::Move(BinId::new(1), 0)],
+                vec![ControlInst::None], // make sure new worker has correct map
                 // vec![ControlInst::Move(BinId::new(0), 2), ControlInst::Move(BinId::new(1), 2)],
+                vec![ControlInst::Map(vec![2; 1 << BIN_SHIFT])],
             ];
             let mut controls =
                 controls
