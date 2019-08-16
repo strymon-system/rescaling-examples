@@ -1,0 +1,11 @@
+[package]
+name = "wordcount-rescaling"
+version = "0.1.0"
+authors = ["Lorenzo Selvatici <selvatici.lorenzo@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+timely = { git = "https://github.com/LorenzSelv/timely-dataflow/", branch = "rescaling-p2p" }
+dynamic_scaling_mechanism = { path = "../megaphone/" }
+colored = "1.8.0"
+
