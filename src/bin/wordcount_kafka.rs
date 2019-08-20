@@ -45,6 +45,7 @@ fn main() {
 
         let mut stateful_probe = ProbeHandle::new();
         let mut correct_probe = ProbeHandle::new();
+        let mut verify_probe = ProbeHandle::new();
 
         let widx = worker.index();
 
@@ -80,7 +81,7 @@ fn main() {
                     .inspect(move |x| println!("[W{}] correct seen: {:?}", widx, x))
                     .probe_with(&mut correct_probe);
 
-            verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0));
+            verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0)).probe_with(&mut verify_probe);
         });
 
         // IMPORTANT: allow a worker joining the cluster to do its initialization.
