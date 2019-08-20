@@ -35,7 +35,11 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
             println!("[W{}@kafka-consumer] subscribed control commands topic", widx);
 
             Some(consumer)
-        } else { cap = None; None };
+        } else {
+            // only worker 0 keeps a capability
+            cap = None;
+            None
+        };
 
         let activator = scope.activator_for(&info.address[..]);
 
@@ -52,7 +56,7 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
                         let payload = message.payload().expect("null payload");
                         let text = std::str::from_utf8(payload).expect("parse error");
 
-                        println!("text is {:?}", text);
+                        // println!("text is {:?}", text);
 
                         let instructions = text.split(",").map(|text| {
                             let tokens = text.split(" ").map(|x| x.to_lowercase().trim().to_string()).collect::<Vec<_>>();
