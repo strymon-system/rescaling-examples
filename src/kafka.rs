@@ -13,7 +13,7 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
 
     source(scope, "ControlStream", |mut cap, info| {
 
-        let consumer = if cap.is_some() && widx == 0 { // Only worker 0 subscribes to the kafka topic
+        let consumer = if widx == 0 { // Only worker 0 subscribes to the kafka topic
             let topic = "megaphone-control";
 
             let mut consumer_config = ClientConfig::new();
@@ -35,11 +35,11 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
             println!("[W{}@kafka-consumer] subscribed control commands topic", widx);
 
             Some(consumer)
-        } else { None };
+        } else { cap = None; None };
 
         let activator = scope.activator_for(&info.address[..]);
 
-        let mut seqno : u64 = 0;
+        let mut seqno: u64 = 0;
 
         move |output| {
             if let Some(consumer) = &consumer {
@@ -51,6 +51,8 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
                         let message = message.expect("kafka error");
                         let payload = message.payload().expect("null payload");
                         let text = std::str::from_utf8(payload).expect("parse error");
+
+                        println!("text is {:?}", text);
 
                         let instructions = text.split(",").map(|text| {
                             let tokens = text.split(" ").map(|x| x.to_lowercase().trim().to_string()).collect::<Vec<_>>();
@@ -66,7 +68,6 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
                                     let map = tokens[1..].into_iter().map(|x| x.parse::<usize>().unwrap()).collect::<Vec<usize>>();
                                     Some(ControlInst::Map(map))
                                 }
-
                                 _ => {
                                     println!("{}", "unrecognized command".bold().red());
                                     None
@@ -86,9 +87,17 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
 
                     // Downgrade the capability until we have caught up with the input stream.
                     // What we would like to do: `cap.downgrade(input_probe.time())`.
-                    while !input_probe.less_equal(cap.time()) {
-                        cap.downgrade(&(*cap.time() + 1))
+                    while !input_probe.done() && !input_probe.less_equal(cap.time()) {
+                        let new_time = *cap.time() + 1;
+                        // println!("downgrading cap to {:?}", new_time);
+                        cap.downgrade(&new_time)
                     }
+
+                }
+
+                if input_probe.done() {
+                    println!("input stream is done, closing control stream");
+                    cap = None;
                 }
             }
         }
