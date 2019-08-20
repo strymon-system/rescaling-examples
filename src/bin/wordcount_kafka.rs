@@ -26,11 +26,11 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::io::{BufReader, BufRead};
-use dynamic_scaling_mechanism::{Control, ControlInst, BinId, BIN_SHIFT};
 use timely::dataflow::operators::broadcast::Broadcast;
 use timely::dataflow::operators::exchange::Exchange;
 use colored::Colorize;
 use rescaling_examples::verify;
+use timely::dataflow::operators::to_stream::ToStream;
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut h = DefaultHasher::new();
@@ -41,18 +41,15 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 fn main() {
     timely::execute_from_args(std::env::args(), |worker| {
         let mut lines_in = InputHandle::new();
-        let mut control_in = InputHandle::new();
 
         let mut stateful_probe = ProbeHandle::new();
         let mut correct_probe = ProbeHandle::new();
-        let mut verify_probe = ProbeHandle::new();
 
         let widx = worker.index();
 
         worker.dataflow::<usize, _, _>(|scope| {
-            let control = control_in.to_stream(scope).broadcast();
 
-            control.inspect(|c| println!("{}", format!("control message is {:?}", c).bold().yellow()));
+            let mut words_probe = ProbeHandle::new();
 
             let words_in =
                 lines_in
@@ -61,7 +58,11 @@ fn main() {
                         text.split_whitespace()
                             .map(move |word| (word.to_owned(), 1))
                             .collect::<Vec<_>>()
-                    );
+                    ).probe_with(&mut words_probe);
+
+            let control = rescaling_examples::kafka::control_stream(scope, words_probe, widx).broadcast();
+
+            control.inspect(|c| println!("{}", format!("control message is {:?}", c).bold().yellow()));
 
             let stateful_out =
                 words_in
@@ -81,7 +82,7 @@ fn main() {
                     .inspect(move |x| println!("[W{}] correct seen: {:?}", widx, x))
                     .probe_with(&mut correct_probe);
 
-            verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0)).probe_with(&mut verify_probe);
+            verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0));
         });
 
         // IMPORTANT: allow a worker joining the cluster to do its initialization.
@@ -93,59 +94,13 @@ fn main() {
         if worker.bootstrap() { return; }
 
         if worker.index() == 0 {
-            let controls = vec![
-                vec![ControlInst::Move(BinId::new(0), 1), ControlInst::Move(BinId::new(1), 0)],
-                vec![ControlInst::None], // make sure new worker has correct map
-                vec![ControlInst::Map(vec![2; 1 << BIN_SHIFT])], // Note: you should spawn the 3rd worker before this command is sent
-                (0..5).map(|bin| ControlInst::Move(BinId::new(bin), bin % 2)).collect::<Vec<_>>(),
-            ];
-            let mut controls =
-                controls
-                    .iter()
-                    .enumerate()
-                    .map(|(seqno, instructions)|
-                        instructions.into_iter().map(|instr| Control::new(seqno as u64, instructions.len(), instr.clone())).collect::<Vec<_>>()
-                    );
-
             let reader = BufReader::new(File::open("text/sample.txt").unwrap());
-            let mut lines = reader.lines();
-
-            let batch_size = 5;
-
-            let mut round = 0;
-
-            loop {
-                let mut done = false;
-
-                for _ in 0..batch_size {
-                    if let Some(line) = lines.next() {
-                        if widx == 0 {
-                            lines_in.send(line.unwrap());
-                            std::thread::sleep(std::time::Duration::from_millis(500))
-                        }
-                        lines_in.advance_to(round + 1);
-                        control_in.advance_to(round + 1);
-                        worker.step_while(|| stateful_probe.less_than(lines_in.time()));
-                        worker.step_while(|| correct_probe.less_than(lines_in.time()));
-                        round += 1;
-                    } else {
-                        done = true;
-                    }
-                }
-
-                if let Some(controls) = controls.next() {
-                    for control in controls {
-                        control_in.send(control)
-                    }
-
-                    lines_in.advance_to(round + 1);
-                    control_in.advance_to(round + 1);
-                    worker.step_while(|| stateful_probe.less_than(lines_in.time()));
-                    worker.step_while(|| correct_probe.less_than(lines_in.time()));
-                    round += 1;
-                }
-
-                if done { break }
+            for (round, line) in reader.lines().enumerate() {
+                lines_in.send(line.unwrap());
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                lines_in.advance_to(round + 1);
+                worker.step_while(|| stateful_probe.less_than(lines_in.time()));
+                worker.step_while(|| correct_probe.less_than(lines_in.time()));
             }
         }
     }).unwrap();

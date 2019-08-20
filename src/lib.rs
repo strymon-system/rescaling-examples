@@ -1,3 +1,5 @@
+pub mod kafka;
+
 use timely::dataflow::{Scope, Stream};
 use timely::ExchangeData;
 use std::collections::HashMap;
