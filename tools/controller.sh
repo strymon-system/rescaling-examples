@@ -3,7 +3,7 @@
 topic="megaphone-control"
 
 if [[ -z "$KAFKA" ]]; then
-    echo "export KAFKA environment variable with the path to your Kafka installation"
+    echo "export \$KAFKA environment variable with the path to your Kafka installation"
     exit 1
 fi
 
