@@ -1,0 +1,87 @@
+\documentclass[12pt]{extarticle}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{fancyvrb}
+\usepackage{minted}
+\usepackage[margin=1.2in]{geometry}
+\VerbatimFootnotes
+
+\interfootnotelinepenalty=10000
+
+\title{Rescaling of Timely Dataflow}
+\author{Lorenzo Selvatici}
+\date{Aug 2019}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+This document summarizes the work done to support dynamic rescaling of timely dataflow\footnote{https://github.com/LorenzSelv/timely-dataflow/tree/rescaling-p2p}.
+
+In a nutshell, timely runs distributed dataflow computation in a cluster. The shape of the cluster is fixed
+when first initializing the computation: how many timely processes (likely spread across several machines) and how many worker threads per timely process.
+With this project, we allow the addition of new worker processes to the cluster.
+
+In long running jobs with unpredictable workloads, it is likely that the initial configuration will not be the ideal one.
+As such, there is the need to scale-out by adding more workers (and scale-in, by removing worker processes).
+
+\section{Timely Model}
+
+
+* each worker has a copy of the entire dataflow
+* async
+* progress tracking
+
+\section{Rescaling the computation}
+
+\subsection{Overview}
+
+* communication crate -- backfilling existing channels with new pushers
+
+* new worker initialization
+  - dataflow
+  - progress tracking => 2 approaches below
+  - capabilities
+
+* megaphone to redistribute the state to the new worker
+
+\subsection{Pub-Sub Approach}
+
+* external pub-sub system, with update-compaction
+* 2 RTT but less communication volume as there is no broadcast (maybe scales better?)
+* problem: generic types (e.g. timestamp) require external pub-sub system to be type-aware
+   => need to build the dataflow, might as well have some worker also acts as the pub-sub system
+   => now there is a "special worker"
+
+\subsection{Peer-to-Peer Approach}
+
+* new worker selects another worker to perform the bootstrapping
+* bootstrapping protocol
+
+\subsection{Megaphone Integration}
+
+* not much, just number of peers changing over time
+
+\section{Evaluation}
+
+* steady-state overhead compared to timely master (changes slowed down something?)
+* plot latency vs time (epochs), two lines with expected behaviour:
+    1) timely/master can't keep-up with input rate of sentences (linearly increasing)
+    2) timely/rescaling can't keep-up as well, and it's slightly higher due to some overhead?
+       rescale operation to spawn one/two more workers => spike in latency but the lower
+
+* size of the progress state over time, as a function of:
+  - number of workers
+  - workload type
+
+* breakdown of timing in the protocol
+
+\section{Limitations and Future Work}
+
+* no removal of workers
+* no capabilities at all for new workers
+* formal verification of the protocol
+
+\end{document}
