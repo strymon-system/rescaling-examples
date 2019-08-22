@@ -29,23 +29,152 @@ As such, there is the need to scale-out by adding more workers (and scale-in, by
 
 \section{Timely Model}
 
-
 * each worker has a copy of the entire dataflow
 * async
 * progress tracking
 
 \section{Rescaling the computation}
 
-\subsection{Overview}
+We now go into details of how the rescaling is actually implemented.
+Firstly, a high-level overview of the key points that need to be dealt with is given.
+Secondly, we present the design options for the initialization of the progress tracking state for the new worker.
+Lastly, we describe the (rather smooth) integration with Megaphone.
 
-* communication crate -- backfilling existing channels with new pushers
+\subsection{Communication Infrastructure}
 
-* new worker initialization
-  - dataflow
-  - progress tracking => 2 approaches below
-  - capabilities
+Rescaling the computation is possible only when running in cluster mode: multiple timely processes, each wrapping several worker
+threads, are established connections to each other and exchange both data and progress updates.
 
-* megaphone to redistribute the state to the new worker
+In this setting, "adding more workers" means adding another timely process with the same number of worker threads
+of every other timely process in the cluster.
+
+Communication among workers happens in two instances:
+\begin{itemize}
+    \item \verb|exchange| operator
+    \item progress updates broadcast
+\end{itemize}
+
+In both cases, communication is enabled by \textit{allocating a channel} which contains an endpoint to every other worker
+for both sending and receiving (\verb|Pusher| and \verb|Puller| traits, respectively).
+
+Channel allocations happen while building the dataflow within the \verb|worker::dataflow| function call.
+
+If a new worker process joins the cluster, we need to \textit{back-fill} these previously allocated channels.
+We do this by storing a closure for each past allocation, so that when the new worker initiates the connection
+we can invoke these closures which add the supplied pushers to the list of pushers forming the channel.
+
+Each channel is associated with a specific data type.
+Thus, we cannot simply store a map of \verb|(channel id => channel handle|, as collections can be generic but also need to be homogeneous.
+One might work around this by using trait objects, but then the channel would be associated with the trait object itself rather than the concrete
+type. There might be a cleaner solution to the problem, though.
+
+
+\vspace{3mm}
+\noindent
+When running in cluster mode, each worker process spawns an extra-thread that will accept incoming connections from workers joining the cluster.
+Upon accepting the connection, the thread will spawn a pair of \verb|send| and \verb|recv| network threads, perform some bookkeeping and
+finally inform the worker threads about the new timely process that is trying to join the cluster.
+This is achieved by sending a \verb|RescaleMessage| on a shared \verb|mpsc| channel.
+
+Worker threads need to explicitly check for rescale messages via the \verb|worker::rescale| function call.
+This is done in the very beginning of the \verb|worker::step| function.
+
+With the exception of the \textit{bootstrap} protocol that we will talk about in a later section,
+this is all from the perspective of worker processes already in the cluster.
+
+\subsection{New Worker Initialization}
+
+Initialization of the new worker boils down to two things:
+\begin{itemize}
+    \item building the dataflow (possibly more than one)
+    \item initialize the progress tracker
+\end{itemize}
+
+We will now talk about them in detail.
+
+\subsubsection{Building the dataflow}
+Since the binary for the new process is identical to the binary of the other processes,
+the construction of the dataflow comes for free.
+The single and very important difference is how we handle \textit{capabilities}.
+In particular, generic operators such as \verb|source| and \verb|unary_frontier| supply
+a capability to the user-provided constructor, which can use it request notifications
+or store it to retain the ability of producing output.
+
+Clearly, as the new worker can join at any time in the computation, we must not supply
+capabilities for timestamps (epochs) that have been closed already as that would allow
+the worker to produce output ``in the past''.
+
+Ideally, one would like to have a capability consistent with the frontier
+of that operator at the time of joining the cluster.
+
+% TODO: maybe move to the limitations section
+
+Unfortunately, there are some complications in trying to do this:
+\begin{itemize}
+    \item As already mentioned, capabilities are passed to the constructor
+        of the generic operators while building the dataflow. However, at least
+        with the current implementation of the bootstrap protocol, we need to build
+        the dataflow \textit{before} actually performing the protocol. But then
+        we do not know the operator frontier and thus also the right capability to supply.
+
+    \item If we do supply a capability for a certain timestamp `t`, we need to ensure
+        that no other worker will ever consider that timestamp ``closed'' before the new
+        worker discard the capability for that timestamp (e.g. by dropping or downgrading it).
+
+\end{itemize}
+
+For the first item, the issue could be worked-around by sending a map to the new
+worker which, for each operator, specifies the frontier of that operator.
+
+Then, while building the dataflow, the new worker would look up in the map the frontiers
+and supply appropriate capabilities.
+
+An alternative solution, and the one currently implemented, is to \textit{not} supply capabilities at all.
+This approach does bring some limitations for the new worker:
+\begin{itemize}
+    \item Operators can produce output only in response to some input (which comes with the associated capability for that timestamp).
+        As such, \verb|source| operators are useless for new worker: they do not hold any capability and cannot produce any output.
+    \item Operators cannot request notifications for future times unless they use capabilities that came with input data.
+\end{itemize}
+
+There is an asymmetry between workers which hold capabilities (initial workers present in the cluster)
+and are capable of injecting new data in the dataflow (via the \verb|source| operators) and workers
+that do not hold capabilities as they joined the cluster at a later time. So, while we can add worker
+at runtime, there are some special workers.
+Looking from a fault-tolerant perspective, where we would like to allow arbitrary worker to crash without
+compromising the execution, this could be a showstopper.
+
+\vspace{3mm}
+For the second item, the bootstrap worker (see later section about the bootstrapping protocol)
+should emit a \verb|(t, +1)|\footnote{it should actually be \verb|num_worker_threads| instead of \verb|+1|, as every new worker thread should get a capability}
+pointstamp (progress update), to ensure that the timestamp \verb|t| will not be closed
+until the corresponding \verb|(t, -1)| pointstamp is emitted.
+Such \verb|(t, -1)| will be emitted by the new worker upon downgrading the capability.
+
+\subsubsection{Initializing the Progress Tracker}
+The progress tracking protocol is arguably the most important component at the core of timely computational model.
+As such we need to ensure that new workers have an up-to-date and correct view of the progress state.
+
+When building the dataflow, each operator is supplied by default with capabilities for timestamp \verb|0| (or the default analogous for different
+timestamp types). Some operators do not require capabilities and simply discard them. Other operators use them to request notification,
+produce output, etc.
+These operations on capabilities are associated with the emission of progress updates, made of a pair \verb|(pointstamp, delta)|.
+These progress updates are broadcasted by every worker to all other workers via the established TCP connections between pair of processes.
+
+There are two alternatives to initialize the progress state of the new worker:
+\begin{itemize}
+    \item Reconstruct a consistent view by all the frontiers of the operator, which have changed over time as a consequence of progress updates
+    \item Record and accumulate every progress update that has been sent so that we can apply them again
+\end{itemize}
+
+We implemented the second option, as it is easier to reason about and hard to get wrong. Also,
+as progress updates tend to cancel each other out (\verb|+1| and \verb|-1| pairs), we \textit{expect}
+such accumulation to remain fairly small, no matter how long the computation has been run for.
+We should add proper instrumentation to the code to verify this claim.
+
+In the next two sections we present the two alternatives for implementing the above idea:
+\verb|pubsub|-based approach and \verb|peer-to-peer|-based approach, both of them
+have been implemented to some extent, but \verb|peer-to-peer| turned out to be a better option.
 
 \subsection{Pub-Sub Approach}
 
@@ -67,6 +196,9 @@ As such, there is the need to scale-out by adding more workers (and scale-in, by
 \section{Evaluation}
 
 * steady-state overhead compared to timely master (changes slowed down something?)
+   - look up diff for any overhead change
+   - progress state update
+
 * plot latency vs time (epochs), two lines with expected behaviour:
     1) timely/master can't keep-up with input rate of sentences (linearly increasing)
     2) timely/rescaling can't keep-up as well, and it's slightly higher due to some overhead?
