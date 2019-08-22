@@ -248,14 +248,18 @@ The bootstrap server, while performing the protocol does not perform other work.
 structures, it was not possible to spawn a separate thread to perform the protocol.
 
 
-The bootstrap protocol (also depicted in Figure \ref{fig:bootstrapprotocol} consists of the following steps:
+The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) consists of the following steps:
 
-%% TODO bootstrap protocol pic
+\begin{figure}[h]
+    \centerline{\includegraphics[width=.8\linewidth]{imgs/bootstrapprotocol.pdf}}
+    \caption{Bootstrap protocol, timely processes are shown as circles}
+    \label{fig:bootstrapprotocol}
+\end{figure}
 
 We will refer to the new worker joining the cluster as ``bootstrap client''.
 
 \begin{enumerate}
-    \item \texttt{Bootstrap client waiting for an incoming connection at some arbitrary bootstrap address}.
+    \item \texttt{Bootstrap client waits for an incoming connection at some arbitrary bootstrap address}.
 
     \item \texttt{Bootstrap server initiates the connection to that same address.}
 
@@ -290,6 +294,11 @@ We will refer to the new worker joining the cluster as ``bootstrap client''.
 \subsection{Megaphone Integration}
 
 * not much, just number of peers changing over time
+
+\section{API changes affecting user code}
+
+* capability is now an option
+* need to call worker::bootstrap
 
 \section{Evaluation}
 
