@@ -3,6 +3,7 @@
 \usepackage{graphicx}
 \usepackage{fancyvrb}
 \usepackage{minted}
+\usepackage{enumitem}
 \usepackage[margin=1.2in]{geometry}
 \VerbatimFootnotes
 
@@ -66,7 +67,11 @@ we can invoke these closures which add the supplied pushers to the list of pushe
 Each channel is associated with a specific data type.
 Thus, we cannot simply store a map of \verb|(channel id => channel handle|, as collections can be generic but also need to be homogeneous.
 One might work around this by using trait objects, but then the channel would be associated with the trait object itself rather than the concrete
-type. There might be a cleaner solution to the problem, though.
+type.
+
+Moreover, fast-forwarding a bit, having a closure turned out to be very handy when implementing the bootstrap protocol to initialize the new worker
+progress tracker: when adding the new pusher to the list, we also push a \textit{bootstrap message} that informs the new worker about the next
+progress-update sequence number it will receive from that direct connection.
 
 
 \vspace{3mm}
@@ -178,16 +183,109 @@ have been implemented to some extent, but \verb|peer-to-peer| turned out to be a
 
 \subsection{Pub-Sub Approach}
 
-* external pub-sub system, with update-compaction
-* 2 RTT but less communication volume as there is no broadcast (maybe scales better?)
-* problem: generic types (e.g. timestamp) require external pub-sub system to be type-aware
-   => need to build the dataflow, might as well have some worker also acts as the pub-sub system
-   => now there is a "special worker"
+One possible design would be to swap the all-to-all communication pattern for progress updates
+with a single \verb|pubsub| system. Such system would have established connection to all workers.
+Each worker would send its progress updates that will be broadcasted on its behalf. Each worker
+then reads progress updates from every other worker.
+
+Progress updates from each worker could be appended to a queue and when every other worker currently
+in the cluster has read the progress updates up to a certain point, updates before that point
+can be safely compacted (most term would cancel out).
+
+When a new worker joins the cluster, it would ``subscribe'' to every other worker queue,
+initialize its progress tracking state using the compacted updates and finally start reading
+new updates from the append-only queue of updates.
+
+A possible implementation of such queue mechanism has been implemented\footnote{https://github.com/LorenzSelv/pubsub}.
+
+\subsubsection{Discussion}
+
+While this sounds like a clean and simple idea, there are a few complications:
+\begin{itemize}
+    \item To perform updates compaction, the \verb|pubsub| system needs to be aware of timestamp
+        data types in the dataflow. Since these timestamps depend on the dataflow that has been constructed,
+        the \verb|pubsub| system needs to build the same dataflow, unless we implement some weird export
+        mechanism. Moreover, the \verb|pubsub| system needs to use timely data types, which would require
+        a circular dependency between the two otherwise-unrelated crates.
+
+    \item More on a philosophical note, adding this external system, which also represents a single point of
+        failure, goes a bit against the peer-to-peer spirit of timely.
+
+\end{itemize}
+
+From performances point of view, there would be definitely some overhead associated with the \verb|pubsub|
+system itself. Among other things, now there are two hop that a message needs to go through before reaching
+its destination. On the other hand, one could easily optimize the amount of progress messages sent around:
+you could have a single subscriber per process, so that the same progress messages are not duplicated
+because of multiple internal worker threads. This might also solve the communication volume bottleneck
+that some experiments show to prevent timely from scaling-out after a certain limit%
+\footnote{mostly referring to the results in the Noria paper, but we should perform some proper experiments to investigate this further}.
+
 
 \subsection{Peer-to-Peer Approach}
 
-* new worker selects another worker to perform the bootstrapping
-* bootstrapping protocol
+An alternative design would be to have the new worker initializes its progress tracking state
+by selecting some \textit{bootstrap server} and perform some \textit{bootstrap protocol}.
+
+In particular, the bootstrap server is simply another worker that is selected to help the
+new worker initializes its progress tracking state.
+
+The rescale message received by the worker thread contains a flag signaling if the worker thread
+was selected as the bootstrap server, and in that case it would initiate the bootstrap protocol.
+
+\subsubsection{Bootstrap Protocol}
+
+Before describing the protocol, we presents some changes needed to make it possible.
+To begin with, the server side of the protocol is performed in the \verb|Worker::rescale|\footnote{\verb|timely/src/worker.rs|}
+and \verb|TcpAllocator::rescale|\footnote{\verb|communication/src/allocator/zero_copy/allocator.rs|} functions;
+the client side of the protocol is performed in the \verb|bootstrap_worker_client|\footnote{\verb|communication/src/rescaling/bootstrap.rs|} function.
+
+Somewhat similarly to the previous approach, each \verb|Progcaster|\footnote{the entity responsible for broadcasting and receiving progress updates
+for a specific scope} keeps an accumulation of all progress updates as a \verb|ChangeBatch|.
+We define the progress state as this accumulation plus the information about the last sequence number included in the state for each worker.
+
+The bootstrap server, while performing the protocol does not perform other work. Since it needs to use non-thread-safe data
+structures, it was not possible to spawn a separate thread to perform the protocol.
+
+
+The bootstrap protocol (also depicted in Figure \ref{fig:bootstrapprotocol} consists of the following steps:
+
+%% TODO bootstrap protocol pic
+
+We will refer to the new worker joining the cluster as ``bootstrap client''.
+
+\begin{enumerate}
+    \item \texttt{Bootstrap client waiting for an incoming connection at some arbitrary bootstrap address}.
+
+    \item \texttt{Bootstrap server initiates the connection to that same address.}
+
+    \item \texttt{Bootstrap server sends the progress tracking state to the new worker and start recording following progress updates.}
+        The progress tracking state has been defined above. Recording messages simply means appending them to a list (different for each worker)
+        so that we can access them at a later time. The lists are cleared at the end of the protocol.
+
+    \item \texttt{Bootstrap server listens for incoming progress-updates-range requests.}
+
+    \item \texttt{Bootstrap client inspects direct TCP connections with other workers, where it will finds the bootstrap message, containing the next progress-update sequence number it will read from that channel.}
+        The bootstrap message is the first message that is sent over the newly-established TCP connection.
+
+    \item \texttt{Bootstrap client computes the missing progress updates ranges by comparing the sequence numbers, in the state and the ones in the bootstrap messages.}
+        Since the new worker has the guarantee that it will see all progress updates with sequence number greater or equal to the one in the bootstrap
+        message, filling the missing gaps between the received progress state and the such sequence numbers guarantees that it will have seen all
+        progress updates.
+
+    \item \texttt{Bootstrap client sends progress-updates-range requests to the bootstrap server.}
+
+    \item \texttt{Bootstrap server sends progress-updates-range responses to the bootstrap client.}
+        A progress-updates-range request has the format \texttt{(scope\_id, worker\_index, start/end sequence number)}
+        which uniquely identifies some updates range. If the bootstrap server cannot fulfill the request
+        as it has not seen all requested messages yet, it will pull more progress updates from the channels with the other workers.
+        Eventually, all required progress will be received also by the bootstrap server which
+        will be then able to fulfill the request.
+
+    \item \texttt{Bootstrap client terminates the bootstrapping protocol by closing the connection.}
+
+\end{enumerate}
+
 
 \subsection{Megaphone Integration}
 
