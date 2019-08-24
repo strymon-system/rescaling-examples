@@ -59,10 +59,15 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
                         // println!("text is {:?}", text);
 
                         let instructions = text.split(",").map(|text| {
+                            let text = text.trim();
                             let tokens = text.split(" ").map(|x| x.to_lowercase().trim().to_string()).collect::<Vec<_>>();
 
                             match tokens[0].as_str() {
-                                "none" => Some(ControlInst::None),
+                                "bootstrap" => {
+                                    let bootstrap_server = tokens[1].parse::<usize>().expect("invalid bootstrap_server for bootstrap operation");
+                                    let new_worker = tokens[2].parse::<usize>().expect("invalid new_worker for bootstrap operation");
+                                    Some(ControlInst::Bootstrap(bootstrap_server, new_worker))
+                                },
                                 "move" => {
                                     let bin = tokens[1].parse::<usize>().expect("invalid bin for move operation");
                                     let target_worker = tokens[2].parse::<usize>().expect("invalid target worker for move operation");

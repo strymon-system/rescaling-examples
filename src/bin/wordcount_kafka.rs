@@ -66,6 +66,7 @@ fn main() {
 
             let stateful_out =
                 words_in
+                    .exchange(|(word, _)| calculate_hash(word)) // routing table of an arbitrary worker should route properly
                     .stateful_state_machine(|key: &String, val, agg: &mut u64| {
                         *agg += val;
                         (false, Some((key.clone(), *agg)))

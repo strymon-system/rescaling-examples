@@ -57,15 +57,16 @@ while true; do
                 SESS=`tmux display-message -p '#S'`
                 SESS=`tmux display-message -p '#S'`
                 WIN="worker-${p}"
+                tmux kill-window -t ${WIN} 2>/dev/null 1>/dev/null
                 tmux new-window -d -n ${WIN}
                 tmux send-keys -t ${SESS}:${WIN}.0 "${spawn_cmd}" Enter || exit 1
             else
                 `${spawn_cmd} > ~/worker-${p} 2>&1 &`
             fi
 
-            # Important: send "none" command so that the new worker will receive the updated megaphone routing table
-            echo "Sending \"none\" control command"
-            echo "none" | $KAFKA/bin/kafka-console-producer.sh --broker-list localhost:9092 --topic ${topic} || exit 1
+            # Important: send "Bootstrap" command so that the new worker will receive the updated megaphone routing table
+            echo "Sending \"bootstrap ${bootstrap_server} ${p}\" control command"
+            echo "bootstrap ${bootstrap_server} ${p}" | $KAFKA/bin/kafka-console-producer.sh --broker-list localhost:9092 --topic ${topic} || exit 1
             echo " Command sent"
 
             p=$((${p}+1))

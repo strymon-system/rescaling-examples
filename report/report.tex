@@ -293,12 +293,205 @@ We will refer to the new worker joining the cluster as ``bootstrap client''.
 
 \subsection{Megaphone Integration}
 
-* not much, just number of peers changing over time
+After the new worker has joined the cluster and initialized its progress tracking state, it is ready to perform some actual
+work. If the dataflow is using plain \verb|exchange| operators, the new worker will start receiving those input data
+that hash to its index (modulo the new number of peers).
 
-\section{API changes affecting user code}
+This ``side effect'' might be acceptable for stateless operator: if the correctness of your computation does \textit{not}
+rely on the fact that a worker sees all the input data that hash to the same value, the result will not be affected by the
+rescaling operation.
 
-* capability is now an option
-* need to call worker::bootstrap
+Most non-trivial operators, however, keep some state used to produce the output when combined to the input data.
+A simple WordCount dataflow is a perfect example: to emit the correct count for a word,
+a worker should see all occurrences for that word.
+
+As a result, we need to rely on some sort of routing table that gives us such guarantee.
+In order to avoid unnecessary overhead for those applications that do not require rescaling or do not need such routing
+guarantee, we decided to not provide this feature as part of core timely: we rely on Megaphone instead.
+
+The changes to Megaphone amounted to a few lines of code: turning the immutable integer representing the number of peers
+into a reference that reflects the actual value. 
+
+\section{Writing Rescalable Timely Programs}
+
+\subsection{Stateless Operators only}
+
+Below is pasted the code for the helloworld timely program that supports rescaling:
+
+\begin{minted}[linenos, highlightlines={22}, highlightcolor=yellow]{rust}
+extern crate timely;
+
+use timely::dataflow::{InputHandle, ProbeHandle};
+use timely::dataflow::operators::{Input, Exchange, Inspect, Probe};
+
+fn main() {
+    timely::execute_from_args(std::env::args(), |worker| {
+
+        let index = worker.index();
+        let mut input = InputHandle::new();
+        let mut probe = ProbeHandle::new();
+
+        worker.dataflow(|scope| {
+            scope.input_from(&mut input)
+                 .exchange(|x| *x)
+                 .inspect(move |x| println!("worker {}: seen {}", index, x))
+                 .probe_with(&mut probe);
+        });
+
+        // if the worker is a new worker joining the cluster,
+        // perform the bootstrap protocol.
+        if worker.bootstrap() { return; }
+
+        // introduce data and watch!
+        for round in 0..10 {
+            if index == 0 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                input.send(round);
+            }
+            input.advance_to(round + 1);
+            while probe.less_than(input.time()) {
+                worker.step();
+            }
+        }
+    }).unwrap();
+}
+\end{minted}
+
+The only difference is the call to \verb|worker.bootstrap()| highlighted in the code.
+The is a no-op for ``normal'' workers. For new workers joining the cluster, however,
+it will perform the bootstrapping protocol to initialize the progress tracking state of the new worker itself.
+It is of critical importance that the call is made right after building \textit{all} dataflows,
+as it will attempt to initialize the progress state for all dataflows that other workers present
+in the cluster have built.
+
+\subsubsection{Sample usage and execution}
+
+Let us compile and run the above program\footnote{source code can be found in at \verb|timely/examples/rescaling/hello.rs|}.
+Start a cluster with two timely processes, each with a single worker thread (run in two different terminals):
+
+\vspace{2mm}
+\noindent
+\verb|$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p0|
+
+\noindent
+\verb|$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p1|
+
+\vspace{2mm}
+Worker 0 will see all even numbers, worker 1 will see all odd numbers.
+
+\noindent
+Before the computation has finished, spawn a new timely process, again with a single worker:
+
+\vspace{2mm}
+\noindent
+\verb|$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p2 -j 0 --nn 3| 
+
+\vspace{2mm}
+\noindent
+Note that there are now two extra arguments:
+\begin{itemize}
+    \item \verb|-j 0| or \verb|--join 0| means that the worker should join the cluster, using worker 0 as the bootstrap server.
+        Any worker can be the bootstrap server.
+    \item \verb|--nn 3| means that the new number of timely processes in the cluster is now 3.
+\end{itemize}
+
+Below we paste the output of a sample execution:
+
+\begin{verbatim}
+
+$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p0
+    Finished dev [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/examples/rescaling_hello -n2 -w1 -p0`
+worker 0: seen 0
+worker 0: seen 2
+worker 0: seen 4
+worker 0:       connection from worker 2, bootstrap address is [Some(127.0.0.1:9002)]
+bootstrap worker server done!
+worker 0: seen 6
+worker 0: seen 9
+\end{verbatim}
+
+
+\begin{verbatim}
+$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p1
+    Finished dev [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/examples/rescaling_hello -n2 -w1 -p1`
+worker 1: seen 1
+worker 1: seen 3
+worker 1: seen 5
+worker 1:       connection from worker 2, bootstrap address is [None]
+worker 1: seen 7
+\end{verbatim}
+
+\begin{verbatim}
+$ cargo run --package timely --example rescaling_hello -- -n2 -w1 -p2 -j0 --nn 3
+    Finished dev [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/examples/rescaling_hello -n2 -w1 -p2 -j0 --nn 3`
+[bootstrap client] connected to worker 0
+workers left: {0, 1}
+workers left: {1}
+[W2] sent updates range ProgressUpdatesRange { channel_id: 8, worker_index: 1, start_seqno: 9, end_seqno: 10 }
+[W2] got updates range response
+[W2] applied updates range response
+done bootstrapping a worker
+worker 2: seen 8
+\end{verbatim}
+
+Ignoring some debug output, we see that after worker 2 has joined the cluster, it receives the input integer 8,
+as \verb|8 mod 3 = 2|. Same reasoning for worker 0 (and worker 1), it was previously seeing only even numbers
+(\verb|X mod 2 = 0|), but after the rescaling operation it receives 6 and 9 as they both result in 0 after the \verb|mod 3|
+operation.
+
+\subsection{Stateful operators}
+
+Below is a simple WordCount example, where we use Megaphone's \verb|stateful_state_machine|
+interface to guarantee correctness of emitted word counts (some parts are omitted for brevity):
+
+\begin{minted}[linenos]{rust}
+fn main() {
+    timely::execute_from_args(std::env::args(), |worker| {
+        let mut lines_in = InputHandle::new();
+        let mut control_in = InputHandle::new();
+        let widx = worker.index();
+
+        worker.dataflow::<usize, _, _>(|scope| {
+            let control = control_in.to_stream(scope).broadcast();
+
+            let words_in =
+                lines_in
+                    .to_stream(scope)
+                    .flat_map(|text: String|
+                        text.split_whitespace()
+                            .map(move |word| (word.to_owned(), 1))
+                            .collect::<Vec<_>>()
+                    );
+
+            words_in
+                .stateful_state_machine(|key: &String, val, agg: &mut u64| {
+                    *agg += val;
+                    (false, Some((key.clone(), *agg)))
+                }, |key| calculate_hash(key), &control)
+                .inspect(move |x| println!("[W{}] stateful seen: {:?}", widx, x))
+        });
+
+        if worker.bootstrap() { return; }
+        if worker.index() == 0 { /* send lines and reconfiguration commands */ }
+    }).unwrap()
+}
+\end{minted}
+
+
+Differently from before, when the new worker joins the cluster, it will not receive any input until
+some reconfiguration command moves the ownership of some of the bins to it.
+
+Arbitrary initialization of the map 
+
+
+
+
+
+
+
 
 \section{Evaluation}
 
