@@ -39,7 +39,7 @@ As such, there is the need to scale-out by adding more workers (and scale-in, by
 We now go into details of how the rescaling is actually implemented.
 Firstly, a high-level overview of the key points that need to be dealt with is given.
 Secondly, we present the design options for the initialization of the progress tracking state for the new worker.
-Lastly, we describe the (rather smooth) integration with Megaphone.
+Lastly, we describe the integration with Megaphone.
 
 \subsection{Communication Infrastructure}
 
@@ -297,7 +297,7 @@ After the new worker has joined the cluster and initialized its progress trackin
 work. If the dataflow is using plain \verb|exchange| operators, the new worker will start receiving those input data
 that hash to its index (modulo the new number of peers).
 
-This ``side effect'' might be acceptable for stateless operator: if the correctness of your computation does \textit{not}
+This ``side effect'' might be acceptable for stateless operator or if the correctness of your computation does \textit{not}
 rely on the fact that a worker sees all the input data that hash to the same value, the result will not be affected by the
 rescaling operation.
 
@@ -309,14 +309,57 @@ As a result, we need to rely on some sort of routing table that gives us such gu
 In order to avoid unnecessary overhead for those applications that do not require rescaling or do not need such routing
 guarantee, we decided to not provide this feature as part of core timely: we rely on Megaphone instead.
 
-The changes to Megaphone amounted to a few lines of code: turning the immutable integer representing the number of peers
-into a reference that reflects the actual value. 
+Two main changes where needed to support rescaling operation in Megaphone, we will now describe them.
+
+\subsubsection{Variable number of peers}
+After a rescaling operation, the numbers of peers in the cluster has changed. Thus, we must keep a reference
+that reflects the current value rather than a simple integer.
+
+\subsubsection{Initializing the new worker Routing State}
+When a new worker joins the cluster, it initializes its dataflow and progress tracking state.
+However, the bootstrap protocol does not perform any initialization of operators' state, such as the
+routing table for Megaphone's stateful operators.
+
+To ensure correctness, we need to make sure that input data are properly routed even by new workers.
+
+As a result, we slightly modified the structure of Megaphone's F operator (the one storing the routing table
+and receiving re-configuration commands) by adding a feedback connection with an \verb|exchange| operator
+to transfer the routing state from the bootstrap server to the new worker. The state is transferred
+when the newly introduced \verb|Bootstrap| command is received.
+
+A rescaling operation consists of the following steps:
+\begin{itemize}
+    \item The new timely process is spawned, it setups connections and perform the bootstrap protocol. At this
+        point, the routing state is not initialized, thus the new worker must not process any input yet.
+    \item The controller must send a \verb|Boostrap| command in the control commands stream. The command
+        payload specifies the indices of the bootstrap server and of the new worker.
+    \item Upon receiving the \verb|Bootstrap| command, the bootstrap server send its routing state to the
+        new worker using the feedback connection we described above.
+    \item Upon receiving the routing state, the new worker implants it and can now start to consume input data
+        and route them appropriately.
+\end{itemize}
+
+For ease when reasoning about the correctness of the protocol to initialize the routing state,
+we require that no other control command is issued for the same timestamp of a \verb|Bootstrap| command.
+
+Moreover, we also require that there are no pending configurations changes for which corresponding
+control notifications have been already delivered (meaning that the input frontier of the operator reached the
+same totally-ordered timestamp of the control command, but the configuration change has not been applied yet).
+The reason for this extra constraint is the impossibility to transfer capability associated to the
+reconfiguration to the new worker.
+
+We do allow, on the other hand, pending configuration for which notifications have not been delivered yet (``future''
+re-configurations). Since we have the guarantee that they have timestamp strictly larger than the bootstrap time,
+the new worker can use the capability associated with the receival of the
+routing state to setup the corresponding notifications.
+
+The routing state is made of the currently active routing table plus all future re-configurations.
 
 \section{Writing Rescalable Timely Programs}
 
 \subsection{Stateless Operators only}
 
-Below is pasted the code for the helloworld timely program that supports rescaling:
+Below is pasted the code for the rescalable \verb|HelloWorld| timely program:
 
 \begin{minted}[linenos, highlightlines={22}, highlightcolor=yellow]{rust}
 extern crate timely;
@@ -358,7 +401,7 @@ fn main() {
 \end{minted}
 
 The only difference is the call to \verb|worker.bootstrap()| highlighted in the code.
-The is a no-op for ``normal'' workers. For new workers joining the cluster, however,
+It is a no-op for ``normal'' workers. For new workers joining the cluster, however,
 it will perform the bootstrapping protocol to initialize the progress tracking state of the new worker itself.
 It is of critical importance that the call is made right after building \textit{all} dataflows,
 as it will attempt to initialize the progress state for all dataflows that other workers present
@@ -440,11 +483,11 @@ worker 2: seen 8
 Ignoring some debug output, we see that after worker 2 has joined the cluster, it receives the input integer 8,
 as \verb|8 mod 3 = 2|. Same reasoning for worker 0 (and worker 1), it was previously seeing only even numbers
 (\verb|X mod 2 = 0|), but after the rescaling operation it receives 6 and 9 as they both result in 0 after the \verb|mod 3|
-operation.
+operation (where \verb|3| is the new number of peers in the cluster).
 
 \subsection{Stateful operators}
 
-Below is a simple WordCount example, where we use Megaphone's \verb|stateful_state_machine|
+Below is a simple \verb|WordCount| example, where we use Megaphone's \verb|stateful_state_machine|
 interface to guarantee correctness of emitted word counts (some parts are omitted for brevity):
 
 \begin{minted}[linenos]{rust}
@@ -467,6 +510,8 @@ fn main() {
                     );
 
             words_in
+                // the routing table of an arbitrary worker should route properly
+                .exchange(|(word, _)| calculate_hash(word))
                 .stateful_state_machine(|key: &String, val, agg: &mut u64| {
                     *agg += val;
                     (false, Some((key.clone(), *agg)))
@@ -484,12 +529,7 @@ fn main() {
 Differently from before, when the new worker joins the cluster, it will not receive any input until
 some reconfiguration command moves the ownership of some of the bins to it.
 
-Arbitrary initialization of the map 
-
-
-
-
-
+A short demo is available at. %% TODO link demo
 
 
 
