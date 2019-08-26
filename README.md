@@ -7,9 +7,9 @@ to perform state migrations.
 
 The examples depend on the `rescaling-p2p` and `rescaling` branches of `timely` and `megaphone` respectively (see `Cargo.toml` for more details).
 
-## Sample usage - WordCount
+### Demo
 
-Video ![](demo.mp4)
+A short demo can be found at https://www.youtube.com/watch?v=Zsf-eMvHUxU.
 
 ### Manual execution and explanation
 
