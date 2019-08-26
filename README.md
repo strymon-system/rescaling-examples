@@ -9,6 +9,10 @@ The examples depend on the `rescaling-p2p` and `rescaling` branches of `timely` 
 
 ## Sample usage - WordCount
 
+Video ![](demo.mp4)
+
+### Manual execution and explanation
+
 We spawn two worker processes in cluster mode, each with a single worker thread
 (each process must have the same number of worker threads):
 
