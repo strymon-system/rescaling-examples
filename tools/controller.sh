@@ -64,9 +64,13 @@ while true; do
                 `${spawn_cmd} > ~/worker-${p} 2>&1 &`
             fi
 
-            # Important: send "Bootstrap" command so that the new worker will receive the updated megaphone routing table
-            echo "Sending \"bootstrap ${bootstrap_server} ${p}\" control command"
-            echo "bootstrap ${bootstrap_server} ${p}" | $KAFKA/bin/kafka-console-producer.sh --broker-list localhost:9092 --topic ${topic} || exit 1
+            # Important: send "Bootstrap" command so that the new workers will receive the updated megaphone routing table
+            bootstrap_cmds="bootstrap ${bootstrap_server} $((p*w))"
+            for i in `seq 1 $((w-1))`; do
+                bootstrap_cmds="${bootstrap_cmds}, bootstrap ${bootstrap_server} $((p*w+i))"
+            done
+            echo "Sending \"${bootstrap_cmds}\" control command"
+            echo "${bootstrap_cmds}" | $KAFKA/bin/kafka-console-producer.sh --broker-list localhost:9092 --topic ${topic} || exit 1
             echo " Command sent"
 
             p=$((${p}+1))

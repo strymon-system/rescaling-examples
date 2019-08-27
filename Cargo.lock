@@ -81,7 +81,7 @@ dependencies = [
 [[package]]
 name = "dynamic_scaling_mechanism"
 version = "0.0.1"
-source = "git+https://github.com/LorenzSelv/megaphone?branch=rescaling#25b5c7986be8b38d50b1cad61f37a9704bb237af"
+source = "git+https://github.com/LorenzSelv/megaphone?branch=rescaling#a2393eb81d64e7e79aa8cac018acfba19aa80091"
 dependencies = [
  "abomonation 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "abomonation_derive 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
