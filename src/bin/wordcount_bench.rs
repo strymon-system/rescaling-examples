@@ -24,7 +24,7 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 
 fn main() {
     timely::execute_from_args(std::env::args(), |worker| {
-        let should_verify = true;
+        let should_verify = false;
 
         let mut lines_in = InputHandle::new();
         let mut control_in = InputHandle::new();
@@ -49,7 +49,7 @@ fn main() {
 
             let control = control_in.to_stream(scope).broadcast();
 
-            control.inspect(|c| println!("{}", format!("control message is {:?}", c).bold().yellow()));
+            control.inspect(move |c| println!("[W{}] {}", widx, format!("control message is {:?}", c).bold().yellow()));
 
             let stateful_out =
                 words_in
@@ -67,7 +67,7 @@ fn main() {
                             (false, Some((key.clone(), *agg)))
                         }, |_key| 0); // need to send everything to worker 0 as number of peers changes and it would compute the wrong answer (no routing table without megaphone)
 
-                verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0));
+                verify(&correct, &stateful_out);
             }
         });
 
@@ -81,7 +81,7 @@ fn main() {
         let mut spawn_at_epochs = VecDeque::new();
         spawn_at_epochs.push_back(10*1_000_000_000); // 10 seconds
 
-        let n = std::env::var("P").expect("missing P env var -- number of processes").parse::<usize>().unwrap();
+        let n = std::env::var("N").expect("missing N env var -- number of processes").parse::<usize>().unwrap();
         let w = std::env::var("W").expect("missing W env var -- number of workers").parse::<usize>().unwrap();
         let mut p = n;
         let mut nn = n+1;
@@ -98,15 +98,18 @@ fn main() {
             let epoch = epoch_timer.elapsed().as_nanos();
 
             if widx == 0 {
-                if let Some(spawn_at_epoch) = spawn_at_epochs.pop_front() {
-                    if epoch == spawn_at_epoch {
+                if let Some(spawn_at_epoch) = spawn_at_epochs.front() {
+                    if epoch >= *spawn_at_epoch {
+                        spawn_at_epochs.pop_front();
+
                         let old_peers = worker.peers();
                         spawned.push(
                             Command::new("cargo")
                                 .arg("run")
                                 .arg("--bin")
                                 .arg("wordcount_bench")
-                                .arg("--n")
+                                .arg("--")
+                                .arg("-n")
                                 .arg(n.to_string())
                                 .arg("-w")
                                 .arg(w.to_string())
@@ -164,26 +167,23 @@ fn main() {
 
             if epoch < 20*1_000_000_000 { // 20 seconds
                 lines_in.send(lines_gen.next());
-                lines_in.advance_to(epoch);
-                control_in.advance_to(epoch);
             } else {
-                lines_in.advance_to(epoch);
-                control_in.advance_to(epoch);
                 break
             }
 
+            lines_in.advance_to(epoch);
+            control_in.advance_to(epoch);
+
             worker.step();
         }
-
-        let closing_time = *lines_in.time();
 
         // close input streams
         lines_in.close();
         control_in.close();
 
-        worker.step_while(|| stateful_probe.less_than(&closing_time));
+        worker.step_while(|| !stateful_probe.done());
 
-        spawned.into_iter().for_each(|mut worker| assert!(worker.wait().unwrap().success()));
+        // spawned.into_iter().for_each(|mut worker| assert!(worker.wait().unwrap().success()));
 
     }).unwrap();
 }
