@@ -1,36 +1,20 @@
-//! Usage example:
-//!
-//! We spawn two worker processes in cluster mode, each with a single worker thread
-//! (each process must have the same number of worker threads):
-//!
-//! rescaling-examples $ cargo run --bin wordcount -- -n2 -w1 -p0
-//! rescaling-examples $ cargo run --bin wordcount -- -n2 -w1 -p1
-//!
-//! After a few seconds (it can be more but instructions are hardcoded
-//! and we need to spawn the 3rd worker process before the configuration update
-//! migrating state to the new worker is issued) we can spawn the 3rd worker process:
-//!
-//! cargo run --bin wordcount -- -n2 -w1 -p2 --join 0 --nn 3
-//!                              <----->
-//!                                 ^should always remain unchanged
-//!
-//! The arguments have the following semantic:
-//! --join 0 => join the cluster using worker with index 0 as the bootstrap server
-//! --nn 3   => the new number of worker in the cluster
-//!
 use timely::dataflow::{InputHandle, ProbeHandle};
 use timely::dataflow::operators::{Map, Inspect, Probe};
 use timely::dataflow::operators::aggregation::StateMachine;
 use dynamic_scaling_mechanism::state_machine::BinnedStateMachine;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use std::fs::File;
-use std::io::{BufReader, BufRead};
 use timely::dataflow::operators::broadcast::Broadcast;
 use timely::dataflow::operators::exchange::Exchange;
 use colored::Colorize;
-use rescaling_examples::verify;
+use rescaling_examples::{verify, LinesGenerator, LoadBalancer};
 use std::cell::RefCell;
+use dynamic_scaling_mechanism::{ControlInst, BinId, Control, BIN_SHIFT};
+use std::process::Command;
+use std::collections::VecDeque;
+use std::time::Instant;
+
+const WORKER_BOOTSTRAP_MARGIN: u128 = 500 * 1_000_000; // 500 millis (as nanoseconds)
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut h = DefaultHasher::new();
@@ -40,16 +24,16 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 
 fn main() {
     timely::execute_from_args(std::env::args(), |worker| {
+        let should_verify = true;
+
         let mut lines_in = InputHandle::new();
+        let mut control_in = InputHandle::new();
 
         let mut stateful_probe = ProbeHandle::new();
-        let mut correct_probe = ProbeHandle::new();
 
         let widx = worker.index();
 
-        worker.dataflow::<usize, _, _>(|scope| {
-
-            let mut words_probe = ProbeHandle::new();
+        worker.dataflow(|scope| {
 
             let rr = RefCell::new(0_u64);
 
@@ -61,9 +45,9 @@ fn main() {
                         text.split_whitespace()
                             .map(move |word| (word.to_owned(), 1))
                             .collect::<Vec<_>>()
-                    ).probe_with(&mut words_probe);
+                    );
 
-            let control = rescaling_examples::kafka::control_stream(scope, words_probe, widx).broadcast();
+            let control = control_in.to_stream(scope).broadcast();
 
             control.inspect(|c| println!("{}", format!("control message is {:?}", c).bold().yellow()));
 
@@ -73,39 +57,133 @@ fn main() {
                         *agg += val;
                         (false, Some((key.clone(), *agg)))
                     }, |key| calculate_hash(key), &control)
-                    .inspect(move |x| println!("[W{}] stateful seen: {:?}", widx, x))
                     .probe_with(&mut stateful_probe);
 
-            let correct =
-                words_in
-                    .state_machine(|key: &String, val, agg: &mut u64| {
-                        *agg += val;
-                        (false, Some((key.clone(), *agg)))
-                    }, |_key| 0) // need to send everything to worker 0 as number of peers changes and it would compute the wrong answer (no routing table without megaphone)
-                    .inspect(move |x| println!("[W{}] correct seen: {:?}", widx, x))
-                    .probe_with(&mut correct_probe);
+            if should_verify {
+                let correct =
+                    words_in
+                        .state_machine(|key: &String, val, agg: &mut u64| {
+                            *agg += val;
+                            (false, Some((key.clone(), *agg)))
+                        }, |_key| 0); // need to send everything to worker 0 as number of peers changes and it would compute the wrong answer (no routing table without megaphone)
 
-            verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0));
+                verify(&correct.exchange(|_| 0), &stateful_out.exchange(|_| 0));
+            }
         });
 
-        // IMPORTANT: allow a worker joining the cluster to do its initialization.
-        // If the worker running this code:
-        //   - is not joining the cluster, this is a no-op and will return false.
-        //   - is joining the cluster, it will perform the bootstrapping protocol to initialize its state
-        //     and will return true. We return from the function (worker will run to completion) as it
-        //     should not inject any input.
         if worker.bootstrap() { return; }
 
-        if worker.index() == 0 {
-            let reader = BufReader::new(File::open("text/sample.txt").unwrap());
-            for (round, line) in reader.lines().enumerate() {
-                lines_in.send(line.unwrap());
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                lines_in.advance_to(round + 1);
-                worker.step_while(|| stateful_probe.less_than(lines_in.time()));
-                worker.step_while(|| correct_probe.less_than(lines_in.time()));
+        let mut lines_gen = LinesGenerator::new(1000, 10);
+
+        let epoch_timer = Instant::now();
+
+        // epochs ~= ns
+        let mut spawn_at_epochs = VecDeque::new();
+        spawn_at_epochs.push_back(10*1_000_000_000); // 10 seconds
+
+        let n = std::env::var("P").expect("missing P env var -- number of processes").parse::<usize>().unwrap();
+        let w = std::env::var("W").expect("missing W env var -- number of workers").parse::<usize>().unwrap();
+        let mut p = n;
+        let mut nn = n+1;
+        let mut join = 0;
+
+        let mut spawned = Vec::new();
+        let mut spawn_info = None;
+
+        let mut sequence = 0; // control cmd sequence number
+
+        let mut load_balancer = LoadBalancer::new((0..worker.peers()).collect::<Vec<usize>>(), 1<<BIN_SHIFT);
+
+        loop {
+            let epoch = epoch_timer.elapsed().as_nanos();
+
+            if widx == 0 {
+                if let Some(spawn_at_epoch) = spawn_at_epochs.pop_front() {
+                    if epoch == spawn_at_epoch {
+                        let old_peers = worker.peers();
+                        spawned.push(
+                            Command::new("cargo")
+                                .arg("run")
+                                .arg("--bin")
+                                .arg("wordcount_bench")
+                                .arg("--n")
+                                .arg(n.to_string())
+                                .arg("-w")
+                                .arg(w.to_string())
+                                .arg("-p")
+                                .arg(p.to_string())
+                                .arg("--join")
+                                .arg(join.to_string())
+                                .arg("--nn")
+                                .arg(nn.to_string())
+                                .spawn()
+                                .expect("failed to spawn new process"));
+
+                        // wait for the new worker to join the cluster
+                        while old_peers == worker.peers() {
+                            worker.step();
+                        }
+
+                        (0..w)
+                            .map(|i| ControlInst::Bootstrap(join, p*w+i))
+                            .map(|cmd| Control::new(sequence, w, cmd))
+                            .for_each(|ctrl| control_in.send(ctrl));
+
+                        sequence += 1;
+
+                        assert!(spawn_info.is_none());
+                        spawn_info = Some((p, epoch));
+
+                        p += 1;
+                        nn += 1;
+                        join += 1;
+                        join %= worker.peers();
+                    }
+                }
+
+                let mut bin_moved = false;
+                if let Some((new_process, bootstrap_epoch)) = spawn_info {
+                    if epoch > bootstrap_epoch + WORKER_BOOTSTRAP_MARGIN {
+                        // move about 1/peers of the bins to the new `w` workers
+                        let new_workers = (new_process*w..new_process*w+w).collect::<Vec<_>>();
+                        let moves = load_balancer.add_workers(new_workers).map(|(bin, to)| ControlInst::Move(BinId::new(bin), to)).collect::<Vec<_>>();
+                        let count = moves.len();
+                        moves
+                            .into_iter()
+                            .map(|mv| Control::new(sequence, count, mv))
+                            .for_each(|ctrl| control_in.send(ctrl));
+
+                        sequence += 1;
+
+                        bin_moved = true;
+                    }
+                }
+
+                if bin_moved { spawn_info = None; }
             }
+
+            if epoch < 20*1_000_000_000 { // 20 seconds
+                lines_in.send(lines_gen.next());
+                lines_in.advance_to(epoch);
+                control_in.advance_to(epoch);
+            } else {
+                lines_in.advance_to(epoch);
+                control_in.advance_to(epoch);
+                break
+            }
+
+            worker.step();
         }
+
+        let closing_time = *lines_in.time();
+
+        // close input streams
+        lines_in.close();
+        control_in.close();
+
+        worker.step_while(|| stateful_probe.less_than(&closing_time));
+
+        spawned.into_iter().for_each(|mut worker| assert!(worker.wait().unwrap().success()));
+
     }).unwrap();
 }
-

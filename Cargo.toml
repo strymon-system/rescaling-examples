@@ -9,4 +9,6 @@ timely = { git = "https://github.com/LorenzSelv/timely-dataflow/", branch = "res
 dynamic_scaling_mechanism = { git = "https://github.com/LorenzSelv/megaphone", branch = "rescaling", features = ["bin-3"],  default-features = false }
 colored = "1.8.0"
 rdkafka = "0.14.1"
+math="0.0.2"
+rand="0.7.0"
 
