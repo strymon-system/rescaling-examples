@@ -87,7 +87,6 @@ fn main() {
         let mut nn = n+1;
         let mut join = 0;
 
-        let mut spawned = Vec::new();
         let mut spawn_info = None;
 
         let mut sequence = 0; // control cmd sequence number
@@ -103,24 +102,24 @@ fn main() {
                         spawn_at_epochs.pop_front();
 
                         let old_peers = worker.peers();
-                        spawned.push(
-                            Command::new("cargo")
-                                .arg("run")
-                                .arg("--bin")
-                                .arg("wordcount_bench")
-                                .arg("--")
-                                .arg("-n")
-                                .arg(n.to_string())
-                                .arg("-w")
-                                .arg(w.to_string())
-                                .arg("-p")
-                                .arg(p.to_string())
-                                .arg("--join")
-                                .arg(join.to_string())
-                                .arg("--nn")
-                                .arg(nn.to_string())
-                                .spawn()
-                                .expect("failed to spawn new process"));
+
+                        Command::new("cargo")
+                            .arg("run")
+                            .arg("--bin")
+                            .arg("wordcount_bench")
+                            .arg("--")
+                            .arg("-n")
+                            .arg(n.to_string())
+                            .arg("-w")
+                            .arg(w.to_string())
+                            .arg("-p")
+                            .arg(p.to_string())
+                            .arg("--join")
+                            .arg(join.to_string())
+                            .arg("--nn")
+                            .arg(nn.to_string())
+                            .spawn()
+                            .expect("failed to spawn new process");
 
                         // wait for the new worker to join the cluster
                         while old_peers == worker.peers() {
@@ -157,11 +156,9 @@ fn main() {
                             .for_each(|ctrl| control_in.send(ctrl));
 
                         sequence += 1;
-
                         bin_moved = true;
                     }
                 }
-
                 if bin_moved { spawn_info = None; }
             }
 
@@ -182,8 +179,5 @@ fn main() {
         control_in.close();
 
         worker.step_while(|| !stateful_probe.done());
-
-        // spawned.into_iter().for_each(|mut worker| assert!(worker.wait().unwrap().success()));
-
     }).unwrap();
 }
