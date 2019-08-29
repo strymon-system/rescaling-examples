@@ -16,31 +16,25 @@ use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use clap::{Arg, App};
-
 use streaming_harness::util::ToNanos;
 
 use timely::dataflow::{InputHandle, ProbeHandle};
 use timely::dataflow::operators::{Broadcast, Operator, Probe};
 
-use timely::dataflow::channels::pact::{Exchange, Pipeline};
-use timely::dataflow::Stream;
-use timely::dataflow::Scope;
-use timely::ExchangeData;
+use timely::dataflow::channels::pact::Pipeline;
 
 use dynamic_scaling_mechanism::{Control, ControlInst, BinId, BIN_SHIFT};
 use dynamic_scaling_mechanism::notificator::{Notify, TotalOrderFrontierNotificator};
 use dynamic_scaling_mechanism::state_machine::BinnedStateMachine;
 
 use timely::dataflow::operators::input::Handle;
-use rescaling_examples::{verify, LinesGenerator, WordGenerator, LoadBalancer};
+use rescaling_examples::{verify, WordGenerator, LoadBalancer};
 use timely::dataflow::operators::inspect::Inspect;
 use std::process::Command;
 use std::fs::File;
 use colored::Colorize;
 use std::collections::VecDeque;
 use std::io::{Stdout, Write};
-use rdkafka::message::ToBytes;
 
 const WORKER_BOOTSTRAP_MARGIN: u64 = 500_000_000; // wait 500 millis after spawning before sending move commands
 
@@ -51,7 +45,6 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 }
 
 fn main() {
-
     let rate: u64 = 1_0;
     let duration_ns: u64 = 10*1_000_000_000;
     let validate = false;
@@ -90,8 +83,6 @@ fn main() {
                 .unary_frontier(Pipeline, "Data generator", |mut cap, _info| {
                     let mut word_generator = WordGenerator::new_uniform(index, key_space);
                     let mut last_production_time = 0;
-
-                    let mut first_time = true;
 
                     move |input, output| {
                         // Input closed, we're done
