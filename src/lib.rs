@@ -5,8 +5,9 @@ use timely::ExchangeData;
 use std::collections::{HashMap, VecDeque};
 use timely::dataflow::operators::generic::operator::Operator;
 use timely::dataflow::channels::pact::Exchange;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rand::seq::IteratorRandom;
+use rand::rngs::StdRng;
 
 pub fn verify<S: Scope, T: ExchangeData + Ord + ::std::fmt::Debug>(correct: &Stream<S, T>, output: &Stream<S, T>) -> Stream<S, ()> {
     let mut in1_pending: HashMap<_, Vec<_>> = Default::default();
@@ -71,6 +72,35 @@ impl LinesGenerator {
             .map(|_| self.distinct_words.iter().choose(&mut self.rng).unwrap().clone())
             .collect::<Vec<String>>()
             .join(" ")
+    }
+
+    pub fn word_at(&self, index: usize) -> String {
+        self.distinct_words[index].clone()
+    }
+}
+
+pub enum WordGenerator {
+    Uniform(StdRng, usize),
+}
+
+impl WordGenerator {
+
+    pub fn new_uniform(index: usize, keys: usize) -> Self {
+        let seed: [u8; 32] = [1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, index as u8];
+        WordGenerator::Uniform(SeedableRng::from_seed(seed), keys)
+    }
+
+    #[inline(always)]
+    pub fn word_rand(&mut self) -> usize {
+        let index = match *self {
+            WordGenerator::Uniform(ref mut rng, ref keys) => rng.gen_range(0, *keys),
+        };
+        self.word_at(index)
+    }
+
+    #[inline(always)]
+    pub fn word_at(&mut self, k: usize) -> usize {
+        k
     }
 }
 
