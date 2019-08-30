@@ -45,7 +45,7 @@ Lastly, we describe the integration with Megaphone.
 \subsection{Communication Infrastructure}
 
 Rescaling the computation is possible only when running in cluster mode: multiple timely processes, each wrapping several worker
-threads, are established connections to each other and exchange both data and progress updates.
+threads, have established connections to each other and exchange both data and progress updates.
 
 In this setting, "adding more workers" means adding another timely process with the same number of worker threads
 of every other timely process in the cluster.
@@ -66,7 +66,7 @@ We do this by storing a closure for each past allocation, so that when the new w
 we can invoke these closures which add the supplied pushers to the list of pushers forming the channel.
 
 Each channel is associated with a specific data type.
-Thus, we cannot simply store a map of \verb|(channel id => channel handle|, as collections can be generic but also need to be homogeneous.
+Thus, we cannot simply store a map of \verb|(channel id => channel handle)|, as collections can be generic but also need to be homogeneous.
 One might work around this by using trait objects, but then the channel would be associated with the trait object itself rather than the concrete
 type.
 
@@ -93,25 +93,27 @@ this is all from the perspective of worker processes already in the cluster.
 Initialization of the new worker boils down to two things:
 \begin{itemize}
     \item building the dataflow (possibly more than one)
-    \item initialize the progress tracker
+    \item initializing the progress tracker
 \end{itemize}
 
 We will now talk about them in detail.
 
 \subsubsection{Building the dataflow}
-Since the binary for the new process is identical to the binary of the other processes,
+Since the program we use to run the new process is the same to the one of other processes,
 the construction of the dataflow comes for free.
 The single and very important difference is how we handle \textit{capabilities}.
 In particular, generic operators such as \verb|source| and \verb|unary_frontier| supply
 a capability to the user-provided constructor, which can use it request notifications
-or store it to retain the ability of producing output.
+or store it to retain the ability of producing output at a later time.
 
 Clearly, as the new worker can join at any time in the computation, we must not supply
 capabilities for timestamps (epochs) that have been closed already as that would allow
 the worker to produce output ``in the past''.
 
 Ideally, one would like to have a capability consistent with the frontier
-of that operator at the time of joining the cluster.
+of that operator at the time of joining the cluster: if the new worker joins when
+an operator happens to be at some timestamp \verb|t|, it would be fine to provide
+a capability for such timestamp to that operator.
 
 % TODO: maybe move to the limitations section
 
@@ -121,9 +123,9 @@ Unfortunately, there are some complications in trying to do this:
         of the generic operators while building the dataflow. However, at least
         with the current implementation of the bootstrap protocol, we need to build
         the dataflow \textit{before} actually performing the protocol. But then
-        we do not know the operator frontier and thus also the right capability to supply.
+        we do not know the operator frontier and thus also the right capability to supply when building the dataflow.
 
-    \item If we do supply a capability for a certain timestamp `t`, we need to ensure
+    \item If we do supply a capability for a certain timestamp \verb|t|, we need to ensure
         that no other worker will ever consider that timestamp ``closed'' before the new
         worker discard the capability for that timestamp (e.g. by dropping or downgrading it).
 
@@ -131,24 +133,23 @@ Unfortunately, there are some complications in trying to do this:
 
 For the first item, the issue could be worked-around by sending a map to the new
 worker which, for each operator, specifies the frontier of that operator.
-
 Then, while building the dataflow, the new worker would look up in the map the frontiers
 and supply appropriate capabilities.
 
-An alternative solution, and the one currently implemented, is to \textit{not} supply capabilities at all.
-This approach does bring some limitations for the new worker:
+An alternative solution, and the one currently implemented, is to \textit{not} supply capabilities at all to the new worker.
+This approach does bring some limitations:
 \begin{itemize}
     \item Operators can produce output only in response to some input (which comes with the associated capability for that timestamp).
-        As such, \verb|source| operators are useless for new worker: they do not hold any capability and cannot produce any output.
+        As such, \verb|source| operators are useless for new workers: they do not hold any capability and cannot produce any output.
     \item Operators cannot request notifications for future times unless they use capabilities that came with input data.
 \end{itemize}
 
 There is an asymmetry between workers which hold capabilities (initial workers present in the cluster)
 and are capable of injecting new data in the dataflow (via the \verb|source| operators) and workers
 that do not hold capabilities as they joined the cluster at a later time. So, while we can add worker
-at runtime, there are some special workers.
+at runtime, there are some ``special workers''.
 Looking from a fault-tolerant perspective, where we would like to allow arbitrary worker to crash without
-compromising the execution, this could be a showstopper.
+compromising the execution, making this a potential showstopper.
 
 \vspace{3mm}
 For the second item, the bootstrap worker (see later section about the bootstrapping protocol)
@@ -185,7 +186,7 @@ have been implemented to some extent, but \verb|peer-to-peer| turned out to be a
 \subsection{Pub-Sub Approach}
 
 One possible design would be to swap the all-to-all communication pattern for progress updates
-with a single \verb|pubsub| system. Such system would have established connection to all workers.
+with an external \verb|pubsub| system. Such system would have established connection to all workers.
 Each worker would send its progress updates that will be broadcasted on its behalf. Each worker
 then reads progress updates from every other worker.
 
@@ -193,7 +194,7 @@ Progress updates from each worker could be appended to a queue and when every ot
 in the cluster has read the progress updates up to a certain point, updates before that point
 can be safely compacted (most term would cancel out).
 
-When a new worker joins the cluster, it would ``subscribe'' to every other worker queue,
+When a new worker joins the cluster, it would ``subscribe'' to every other worker's queue,
 initialize its progress tracking state using the compacted updates and finally start reading
 new updates from the append-only queue of updates.
 
@@ -218,7 +219,8 @@ From performances point of view, there would be definitely some overhead associa
 system itself. Among other things, now there are two hop that a message needs to go through before reaching
 its destination. On the other hand, one could easily optimize the amount of progress messages sent around:
 you could have a single subscriber per process, so that the same progress messages are not duplicated
-because of multiple internal worker threads. This might also solve the communication volume bottleneck
+because of multiple internal worker threads\footnote{in the current implementation, each progress updates
+is sent to every worker thread, thus there are duplicate messages between pair of processes}. This might also solve the communication volume bottleneck
 that some experiments show to prevent timely from scaling-out after a certain limit%
 \footnote{mostly referring to the results in the Noria paper, but we should perform some proper experiments to investigate this further}.
 
@@ -229,7 +231,7 @@ An alternative design would be to have the new worker initializes its progress t
 by selecting some \textit{bootstrap server} and perform some \textit{bootstrap protocol}.
 
 In particular, the bootstrap server is simply another worker that is selected to help the
-new worker initializes its progress tracking state.
+new worker initializing its progress tracking state.
 
 The rescale message received by the worker thread contains a flag signaling if the worker thread
 was selected as the bootstrap server, and in that case it would initiate the bootstrap protocol.
@@ -245,11 +247,8 @@ Somewhat similarly to the previous approach, each \verb|Progcaster|\footnote{the
 for a specific scope} keeps an accumulation of all progress updates as a \verb|ChangeBatch|.
 We define the progress state as this accumulation plus the information about the last sequence number included in the state for each worker.
 
-The bootstrap server, while performing the protocol does not perform other work. Since it needs to use non-thread-safe data
-structures, it was not possible to spawn a separate thread to perform the protocol.
-
-
-The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) consists of the following steps:
+The bootstrap server, while performing the protocol, does not perform other work. Since it needs to use non-thread-safe data
+structures, it was not possible to spawn a separate thread to perform the protocol concurrently.
 
 \begin{figure}[h]
     \centerline{\includegraphics[width=.8\linewidth]{imgs/bootstrapprotocol.pdf}}
@@ -257,6 +256,7 @@ The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) con
     \label{fig:bootstrapprotocol}
 \end{figure}
 
+The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) consists of the following steps:
 We will refer to the new worker joining the cluster as ``bootstrap client''.
 
 \begin{enumerate}
@@ -270,7 +270,7 @@ We will refer to the new worker joining the cluster as ``bootstrap client''.
 
     \item \texttt{Bootstrap server listens for incoming progress-updates-range requests.}
 
-    \item \texttt{Bootstrap client inspects direct TCP connections with other workers, where it will finds the bootstrap message, containing the next progress-update sequence number it will read from that channel.}
+    \item \texttt{Bootstrap client inspects direct TCP connections with other workers, where it will find the bootstrap messages, containing the next progress-update sequence number it will read from that channel.}
         The bootstrap message is the first message that is sent over the newly-established TCP connection.
 
     \item \texttt{Bootstrap client computes the missing progress updates ranges by comparing the sequence numbers, in the state and the ones in the bootstrap messages.}
@@ -299,8 +299,7 @@ work. If the dataflow is using plain \verb|exchange| operators, the new worker w
 that hash to its index (modulo the new number of peers).
 
 This ``side effect'' might be acceptable for stateless operator or if the correctness of your computation does \textit{not}
-rely on the fact that a worker sees all the input data that hash to the same value, the result will not be affected by the
-rescaling operation.
+rely on the fact that a worker sees all the input data that hash to the same value.
 
 Most non-trivial operators, however, keep some state used to produce the output when combined to the input data.
 A simple WordCount dataflow is a perfect example: to emit the correct count for a word,
@@ -325,22 +324,24 @@ To ensure correctness, we need to make sure that input data are properly routed 
 
 As a result, we slightly modified the structure of Megaphone's F operator (the one storing the routing table
 and receiving re-configuration commands) by adding a feedback connection with an \verb|exchange| operator
-to transfer the routing state from the bootstrap server to the new worker. The state is transferred
+to transfer the routing state from the bootstrap server to the new worker. The routing state is transferred
 when the newly introduced \verb|Bootstrap| command is received.
+The routing state is made of the currently active routing table plus all future re-configurations.
 
 A rescaling operation consists of the following steps:
 \begin{itemize}
-    \item The new timely process is spawned, it setups connections and perform the bootstrap protocol. At this
+    \item The new timely process is spawned, it setups connections and performs the bootstrap protocol. At this
         point, the routing state is not initialized, thus the new worker must not process any input yet.
     \item The controller must send a \verb|Boostrap| command in the control commands stream. The command
-        payload specifies the indices of the bootstrap server and of the new worker.
+        payload specifies the indices of the bootstrap server and of the new worker. It must send a \verb|Bootstrap| command
+        for each new worker thread that joined the cluster with the new timely process.
     \item Upon receiving the \verb|Bootstrap| command, the bootstrap server send its routing state to the
-        new worker using the feedback connection we described above.
+        new worker using the feedback-exchange connection we described above.
     \item Upon receiving the routing state, the new worker implants it and can now start to consume input data
         and route them appropriately.
 \end{itemize}
 
-For ease when reasoning about the correctness of the protocol to initialize the routing state,
+For ease when reasoning about the correctness of the protocol that initializes the routing state,
 we require that no other control command is issued for the same timestamp of a \verb|Bootstrap| command.
 
 Moreover, we also require that there are no pending configurations changes for which corresponding
@@ -353,8 +354,6 @@ We do allow, on the other hand, pending configuration for which notifications ha
 re-configurations). Since we have the guarantee that they have timestamp strictly larger than the bootstrap time,
 the new worker can use the capability associated with the receival of the
 routing state to setup the corresponding notifications.
-
-The routing state is made of the currently active routing table plus all future re-configurations.
 
 \section{Writing Rescalable Timely Programs}
 
@@ -536,20 +535,60 @@ A short demo is available at \url{https://www.youtube.com/watch?v=Zsf-eMvHUxU}.
 
 \section{Evaluation}
 
-* steady-state overhead compared to timely master (changes slowed down something?)
-   - look up diff for any overhead change
-   - progress state update
+Changes that might cause an overhead to core timely when running in cluster mode, even if the rescaling feature is not used:
 
-* plot latency vs time (epochs), two lines with expected behaviour:
-    1) timely/master can't keep-up with input rate of sentences (linearly increasing)
-    2) timely/rescaling can't keep-up as well, and it's slightly higher due to some overhead?
-       rescale operation to spawn one/two more workers => spike in latency but the lower
+\begin{itemize}
+    \item an additional thread is spawned and listens to at some \verb|ip:port| for incoming connection
+    \item \verb|allocate| function to allocate a channel now returns a list of pushers wrapped in a \verb|Rc<RefCell<..>>| so it can be mutated when rescaling,
+              the pointer need to be dereferenced before usage
+    \item progress updates are accumulated in a \verb|ChangeBatch| by each progcaster (this is also true for non-cluster mode)
+\end{itemize}
 
-* size of the progress state over time, as a function of:
-  - number of workers
-  - workload type
+Below is a list of experiments that I believe would be useful to perform to assess performances and back-up some claims with data:
 
-* breakdown of timing in the protocol
+\begin{itemize}
+    \item steady-state overhead compared to timely master: how the changes listed above affect the performances in practice
+    \item plot per-tuple latency versus time (epochs): how adding a new timely process affects latency both during and after the
+        rescaling operation has complete
+    \item measure the size of the progress state over time (accumulated progress updates), as a function of
+        number of workers and workload type (communication-heavy with lots of exchanges versus in-operator heavy computation and minimal communication).
+        We believe that the progress state does not grow in steady-state execution for a fixed number of workers and workload type, as most progress updates
+        cancel out.
+    \item breakdown of timing in the bootstrap protocol
+\end{itemize}
+
+\begin{figure}[h]
+    \centerline{\includegraphics[width=\linewidth]{imgs/latency.pdf}}
+    \caption{Latency percentiles for an initial setup of 2x2 workers and 2 rescaling operations, each adding 2 extra workers}
+    \label{fig:latency}
+\end{figure}
+
+Due to some time constraints, we did not get the chance to run many experiments. In figure \ref{fig:latency} is depicted
+a (not very exciting) plot for per-tuple latencies. The experiment setup was as follows:
+\begin{itemize}
+    \item everything was run on single machine (my personal laptop -- Dell XPS with intel core i7 8th Gen, 16GB RAM)
+    \item the initial cluster was made of 2 timely processes, each with 2 worker threads (thus a total of 4 workers)
+    \item two rescaling operations were performed, each time adding an additional timely process also with 2 worker threads.
+\end{itemize}
+
+The dataflow used is a simple WordCount\footnote{\verb|https://github.com/LorenzSelv/rescaling-examples/blob/master/src/bin/benchmark.rs|} program, where only a single worker samples lines and injects them into the dataflow at a rate of 100 lines per second each with 100 words in it.
+Lines are then distributed in a round-robin fashion among workers. The \verb|flat_map| operator splits lines by
+whitespaces and emit pairs \verb|(word, 1)|. The \verb|stateful_state_machine| function provided by Megaphone then aggregates the elements by key and counts the occurences.
+
+\vspace{3mm}
+
+From the plot we see that the latency is pretty much constant in the beginning. In correspondence of the first rescaling operation,
+there is a spike in latency: a worker is busy performing the bootstrap protocol and the computation is slowed down.
+
+After the new worker joined the cluster we move the ownership of some bins to the new worker with a Megaphone re-configuration command.
+However, the latency does not benefit from this rescaling operation as the latency tends to be higher. Out hypothesis is that
+the workers already present in the cluster were not saturated before the rescaling operation and adding more workers simply 
+increased the communication costs (exchange data and progress messages) which outweighted the benefit of distributing
+the workload more evenly among the workers. The second rescaling operation present a similar behaviour.
+
+A better experiment would present saturation in the beginning and, after the rescaling operation a decrease in latency due to the reduce per-worker-load.
+
+I tried to increase the rate of the input, or the length of the lines, but I decided to stop after freezing my machine twice and having to restart it.
 
 \section{Limitations and Future Work}
 
