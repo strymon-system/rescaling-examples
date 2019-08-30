@@ -24,7 +24,6 @@ use timely::dataflow::operators::{Broadcast, Operator, Probe};
 use timely::dataflow::channels::pact::Pipeline;
 
 use dynamic_scaling_mechanism::{Control, ControlInst, BinId, BIN_SHIFT};
-use dynamic_scaling_mechanism::notificator::{Notify, TotalOrderFrontierNotificator};
 use dynamic_scaling_mechanism::state_machine::BinnedStateMachine;
 
 use timely::dataflow::operators::input::Handle;
@@ -34,7 +33,7 @@ use std::process::Command;
 use std::fs::File;
 use colored::Colorize;
 use std::collections::VecDeque;
-use std::io::{Stdout, Write};
+use std::io::Write;
 
 const WORKER_BOOTSTRAP_MARGIN: u64 = 500_000_000; // wait 500 millis after spawning before sending move commands
 
@@ -45,8 +44,8 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 }
 
 fn main() {
-    let rate: u64 = 1_0;
-    let duration_ns: u64 = 10*1_000_000_000;
+    let rate: u64 = 10_000;
+    let duration_ns: u64 = 20*1_000_000_000;
     let validate = false;
     let key_space = 1000;
 
@@ -122,7 +121,7 @@ fn main() {
                         *agg += val;
                         (false, Some((*key, *agg)))
                     }, |key| calculate_hash(key), &control)
-                    .inspect(move |x| println!("{:?}", x))
+                    //.inspect(move |x| println!("{:?}", x))
                     .probe_with(&mut probe);
 
             if validate {
@@ -289,7 +288,7 @@ fn main() {
 
     if !result.is_empty() {
         let (timelines, spawn_metrics): (Vec<streaming_harness::timeline::Timeline<_,_,_,_>>, Vec<_>) = result.into_iter().unzip();
-        let ::streaming_harness::timeline::Timeline { timeline, latency_metrics, .. } = ::streaming_harness::output::combine_all(timelines);
+        let ::streaming_harness::timeline::Timeline { timeline, .. } = ::streaming_harness::output::combine_all(timelines);
 
         let spawn_metrics = spawn_metrics.first().unwrap(); // only worker 0 measures spawn new processes
 
@@ -300,6 +299,7 @@ fn main() {
 
         let mut metrics = File::create("metrics").unwrap();
         metrics.write(::streaming_harness::format::format_summary_timeline("summary_timeline".to_string(), timeline.clone()).as_bytes()).unwrap();
+        metrics.write(b"\n").unwrap();
         for (bootstrap, mv) in spawn_metrics.iter() {
             metrics.write(format!("spawn_metric\t{}\t{}\n", bootstrap, mv).as_bytes()).unwrap();
         }
