@@ -46,7 +46,7 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 }
 
 fn main() {
-    let rate: u64 = 10_00;
+    let rate: u64 = 100;
     let duration_ns: u64 = 40*1_000_000_000;
     let validate = false;
     let key_space = 1000;

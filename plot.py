@@ -22,9 +22,9 @@ with open("metrics", "rt") as f:
 
 plt.plot(times, percentiles, )#, "p99.9", ))#"max"))
 for (bootstrap, move) in spawn_metrics:
-    plt.axvline(x=bootstrap, linewidth=3, color="y", alpha=.5)
-    plt.axvline(x=move, linewidth=3, color="b", alpha=.5)
+    plt.axvline(x=bootstrap, linewidth=3, color="y", alpha=.3)
+    plt.axvline(x=move, linewidth=3, color="b", alpha=.3)
 plt.legend(("p25", "p50", "p75", "p95", "p99", "bootstrap", "move"))
 plt.xlabel("Time [s]") 
 plt.ylabel("Latency [ms]") 
-plt.show()
+plt.savefig("report/imgs/latency.pdf")
