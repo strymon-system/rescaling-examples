@@ -22,7 +22,7 @@
 
 This document summarizes the work done to support dynamic rescaling of timely dataflow\footnote{https://github.com/LorenzSelv/timely-dataflow/tree/rescaling-p2p}.
 
-In a nutshell, timely runs distributed dataflow computation in a cluster. The shape of the cluster is fixed
+In a nutshell, timely runs a distributed dataflow computation in a cluster. The shape of the cluster is fixed
 when first initializing the computation: how many timely processes (likely spread across several machines) and how many worker threads per timely process.
 With this project, we allow the addition of new worker processes to the cluster.
 
@@ -31,9 +31,16 @@ As such, there is the need to scale-out by adding more workers (and scale-in, by
 
 \section{Timely Model}
 
-* each worker has a copy of the entire dataflow
-* async
-* progress tracking
+Very briefly, we point out some of timely design choices that are relevant to the rescaling project:
+
+\begin{itemize}
+    \item each worker has a copy of the entire dataflow: there is no concept of per-operator parallelism, each worker executes
+        every operator and communicates with every other worker in an all-to-all communication pattern.
+    \item asynchronous computation: there is no master worker that coordinates and schedules the workers for execution, this implies
+        that is also not easy to get a consistent view of the state of the system without stalling the computation.
+    \item the progress tracking is at the core of timely computational model, new worker should make sure they
+        can contribute to the progress tracking protocol without violating its safety properties.
+\end{itemize}
 
 \section{Rescaling the computation}
 
@@ -47,9 +54,11 @@ Lastly, we describe the integration with Megaphone.
 Rescaling the computation is possible only when running in cluster mode: multiple timely processes, each wrapping several worker
 threads, have established connections to each other and exchange both data and progress updates.
 
-In this setting, "adding more workers" means adding another timely process with the same number of worker threads
+In this setting, ``adding more workers'' means adding another timely process with the same number of worker threads
 of every other timely process in the cluster.
 
+\vspace{3mm}
+\noindent
 Communication among workers happens in two instances:
 \begin{itemize}
     \item \verb|exchange| operator
@@ -61,7 +70,8 @@ for both sending and receiving (\verb|Pusher| and \verb|Puller| traits, respecti
 
 Channel allocations happen while building the dataflow within the \verb|worker::dataflow| function call.
 
-If a new worker process joins the cluster, we need to \textit{back-fill} these previously allocated channels.
+If a new worker process joins the cluster, we need to \textit{back-fill} these previously allocated channels, so that
+they have an endpoint to the new worker as well as the previous ones.
 We do this by storing a closure for each past allocation, so that when the new worker initiates the connection
 we can invoke these closures which add the supplied pushers to the list of pushers forming the channel.
 
@@ -123,7 +133,7 @@ Unfortunately, there are some complications in trying to do this:
         of the generic operators while building the dataflow. However, at least
         with the current implementation of the bootstrap protocol, we need to build
         the dataflow \textit{before} actually performing the protocol. But then
-        we do not know the operator frontier and thus also the right capability to supply when building the dataflow.
+        we do not know the operator frontier and thus also the right capability to supply to the constructor.
 
     \item If we do supply a capability for a certain timestamp \verb|t|, we need to ensure
         that no other worker will ever consider that timestamp ``closed'' before the new
@@ -149,7 +159,7 @@ and are capable of injecting new data in the dataflow (via the \verb|source| ope
 that do not hold capabilities as they joined the cluster at a later time. So, while we can add worker
 at runtime, there are some ``special workers''.
 Looking from a fault-tolerant perspective, where we would like to allow arbitrary worker to crash without
-compromising the execution, making this a potential showstopper.
+compromising the execution, this might be a potential showstopper.
 
 \vspace{3mm}
 For the second item, the bootstrap worker (see later section about the bootstrapping protocol)
@@ -170,8 +180,8 @@ These progress updates are broadcasted by every worker to all other workers via 
 
 There are two alternatives to initialize the progress state of the new worker:
 \begin{itemize}
-    \item Reconstruct a consistent view by all the frontiers of the operator, which have changed over time as a consequence of progress updates
-    \item Record and accumulate every progress update that has been sent so that we can apply them again
+    \item Reconstruct a consistent view by all the frontiers of the operators, which have changed over time as a consequence of progress updates.
+    \item Record and accumulate every progress update that has been sent so that we can apply them again.
 \end{itemize}
 
 We implemented the second option, as it is easier to reason about and hard to get wrong. Also,
@@ -198,7 +208,7 @@ When a new worker joins the cluster, it would ``subscribe'' to every other worke
 initialize its progress tracking state using the compacted updates and finally start reading
 new updates from the append-only queue of updates.
 
-A possible implementation of such queue mechanism has been implemented\footnote{https://github.com/LorenzSelv/pubsub}.
+A possible implementation of such queue mechanism has been implemented\footnote{\verb|https://github.com/LorenzSelv/pubsub|}.
 
 \subsubsection{Discussion}
 
@@ -256,8 +266,8 @@ structures, it was not possible to spawn a separate thread to perform the protoc
     \label{fig:bootstrapprotocol}
 \end{figure}
 
-The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) consists of the following steps:
 We will refer to the new worker joining the cluster as ``bootstrap client''.
+The bootstrap protocol (also depicted in figure \ref{fig:bootstrapprotocol}) consists of the following steps:
 
 \begin{enumerate}
     \item \texttt{Bootstrap client waits for an incoming connection at some arbitrary bootstrap address}.
@@ -317,7 +327,7 @@ that reflects the current value rather than a simple integer.
 
 \subsubsection{Initializing the new worker Routing State}
 When a new worker joins the cluster, it initializes its dataflow and progress tracking state.
-However, the bootstrap protocol does not perform any initialization of operators' state, such as the
+However, the bootstrap protocol does not perform any initialization of operators' internal state, such as the
 routing table for Megaphone's stateful operators.
 
 To ensure correctness, we need to make sure that input data are properly routed even by new workers.
@@ -328,6 +338,8 @@ to transfer the routing state from the bootstrap server to the new worker. The r
 when the newly introduced \verb|Bootstrap| command is received.
 The routing state is made of the currently active routing table plus all future re-configurations.
 
+\vspace{3mm}
+\noindent
 A rescaling operation consists of the following steps:
 \begin{itemize}
     \item The new timely process is spawned, it setups connections and performs the bootstrap protocol. At this
@@ -347,8 +359,8 @@ we require that no other control command is issued for the same timestamp of a \
 Moreover, we also require that there are no pending configurations changes for which corresponding
 control notifications have been already delivered (meaning that the input frontier of the operator reached the
 same totally-ordered timestamp of the control command, but the configuration change has not been applied yet).
-The reason for this extra constraint is the impossibility to transfer capability associated to the
-reconfiguration to the new worker.
+The reason for this extra constraint is the impossibility to transfer to the new worker the capability associated with the
+reconfiguration.
 
 We do allow, on the other hand, pending configuration for which notifications have not been delivered yet (``future''
 re-configurations). Since we have the guarantee that they have timestamp strictly larger than the bootstrap time,
@@ -535,26 +547,26 @@ A short demo is available at \url{https://www.youtube.com/watch?v=Zsf-eMvHUxU}.
 
 \section{Evaluation}
 
-Changes that might cause an overhead to core timely when running in cluster mode, even if the rescaling feature is not used:
+Below are listed changes that might cause an overhead to core timely when running in cluster mode, even if the rescaling feature is not used:
 
 \begin{itemize}
-    \item an additional thread is spawned and listens to at some \verb|ip:port| for incoming connection
-    \item \verb|allocate| function to allocate a channel now returns a list of pushers wrapped in a \verb|Rc<RefCell<..>>| so it can be mutated when rescaling,
-              the pointer need to be dereferenced before usage
-    \item progress updates are accumulated in a \verb|ChangeBatch| by each progcaster (this is also true for non-cluster mode)
+    \item an additional thread is spawned and listens at some \verb|ip:port| for incoming connection.
+    \item the \verb|allocate| function used to allocate a inter-worker communication channel now returns a list of pushers wrapped in a \verb|Rc<RefCell<..>>| so it can be mutated when rescaling.
+        The pointer need to be dereferenced before usage.
+    \item Progress updates are accumulated in a \verb|ChangeBatch| by each \verb|Progcaster| (this is also true for non-cluster mode).
 \end{itemize}
 
 Below is a list of experiments that I believe would be useful to perform to assess performances and back-up some claims with data:
 
 \begin{itemize}
-    \item steady-state overhead compared to timely master: how the changes listed above affect the performances in practice
-    \item plot per-tuple latency versus time (epochs): how adding a new timely process affects latency both during and after the
-        rescaling operation has complete
-    \item measure the size of the progress state over time (accumulated progress updates), as a function of
+    \item Steady-state overhead compared to timely master: how the changes listed above affect the performances in practice.
+    \item Plot per-tuple latency versus time (epochs): how adding a new timely process affects latency both during and after the
+        rescaling operation has complete.
+    \item Measure the size of the progress state over time (accumulated progress updates), as a function of
         number of workers and workload type (communication-heavy with lots of exchanges versus in-operator heavy computation and minimal communication).
         We believe that the progress state does not grow in steady-state execution for a fixed number of workers and workload type, as most progress updates
-        cancel out.
-    \item breakdown of timing in the bootstrap protocol
+        cancel out (\verb|+1/-1| pairs).
+    \item Breakdown of timing in the bootstrap protocol.
 \end{itemize}
 
 \begin{figure}[h]
@@ -564,7 +576,7 @@ Below is a list of experiments that I believe would be useful to perform to asse
 \end{figure}
 
 Due to some time constraints, we did not get the chance to run many experiments. In figure \ref{fig:latency} is depicted
-a (not very exciting) plot for per-tuple latencies. The experiment setup was as follows:
+a (not very exciting) plot of per-tuple latencies. The experiment setup was as follows:
 \begin{itemize}
     \item everything was run on single machine (my personal laptop -- Dell XPS with intel core i7 8th Gen, 16GB RAM)
     \item the initial cluster was made of 2 timely processes, each with 2 worker threads (thus a total of 4 workers)
@@ -584,9 +596,9 @@ After the new worker joined the cluster we move the ownership of some bins to th
 However, the latency does not benefit from this rescaling operation as the latency tends to be higher. Out hypothesis is that
 the workers already present in the cluster were not saturated before the rescaling operation and adding more workers simply 
 increased the communication costs (exchange data and progress messages) which outweighted the benefit of distributing
-the workload more evenly among the workers. The second rescaling operation present a similar behaviour.
+the workload more evenly among the workers. The second rescaling operation presents a similar behaviour.
 
-A better experiment would present saturation in the beginning and, after the rescaling operation a decrease in latency due to the reduce per-worker-load.
+A better experiment would present saturation in the beginning and, after the rescaling operation a decrease in latency due to the reduced per-worker-load.
 
 I tried to increase the rate of the input, or the length of the lines, but I decided to stop after freezing my machine twice and having to restart it.
 
@@ -595,7 +607,7 @@ I tried to increase the rate of the input, or the length of the lines, but I dec
 We now highlight what are the limitations at the current stage of development.
 
 \subsection{Removal of Workers}
-One missing, but very important feature for a fully rescalable dataflow computation, is allowing the removal of workers from
+One missing, but very important feature for a fully rescalable dataflow computation is allowing the removal of workers from
 the cluster. While the technical implementation details might not be hardest to deal with, it has a lot of
 overlapping aspects with the fault-tolerance chapter.
 
@@ -609,9 +621,9 @@ into \verb|HashMap|s.
 There are also some subtle and important things one should think about, among the others:
 
 \begin{itemize}
-    \item if the worker leaving the cluster is holding capabilities and does not get the chance to discard them, the other
+    \item If the worker leaving the cluster is holding capabilities and does not get the chance to discard them, the other
         workers have no way to know that those capabilities belonged to the leaving worker, and they would stall as a result.
-    \item if the worker leaving the cluster is owning any data (e.g. is associated with some bins in the
+    \item If the worker leaving the cluster is owning any data (e.g. is associated with some bins in the
         routing table of Megaphone's stateful operator) this would cause some serious problems.
         If we assume that we \textit{decide} when a worker leaves the cluster, we can first transfer state and data ownership to
         other workers and then kill the worker.
@@ -634,5 +646,7 @@ actually swapped with \verb|empty| stream under the hood).
 There was some interest in formally verifying timely progress tracking protocol, but nobody ever put the effort in doing so.
 The extra complexity (hopefully not too much) introduced by the bootstrap protocol might make it worth it to have some additional
 guarantees given by a formal verification. This is not a trivial work and might make an interesting idea for a Master thesis.
+The protocol (without the rescaling feature) has been described in a document\footnote{\verb|https://gitlab.inf.ethz.ch/PROJECT-STRYMON/wiki-progress-tracking/blob/master/report.pdf|}.
+
 
 \end{document}
