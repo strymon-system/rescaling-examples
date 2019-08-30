@@ -54,10 +54,10 @@ pub struct LinesGenerator {
 }
 
 impl LinesGenerator {
-    pub fn new(distinct_words: usize, words_per_line: usize) -> Self {
+    pub fn new(distinct_words: usize, words_per_line: usize, word_length: usize) -> Self {
         let mut rng = rand::thread_rng();
         let distinct_words = (0..distinct_words).map(|_| {
-            (0..10).map(|_| rng.sample(rand::distributions::Alphanumeric)).collect::<String>()
+            (0..word_length).map(|_| rng.sample(rand::distributions::Alphanumeric)).collect::<String>()
         }).collect();
 
         LinesGenerator {
