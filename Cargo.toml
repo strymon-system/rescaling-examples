@@ -5,8 +5,8 @@ authors = ["Lorenzo Selvatici <selvatici.lorenzo@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-timely = { git = "https://github.com/LorenzSelv/timely-dataflow/", branch = "rescaling-p2p" }
-dynamic_scaling_mechanism = { git = "https://github.com/LorenzSelv/megaphone", branch = "rescaling", features = ["bin-3"],  default-features = false }
+timely = { git = "https://github.com/strymon-system/timely-dataflow/", branch = "rescaling-p2p" }
+dynamic_scaling_mechanism = { git = "https://github.com/strymon-system/megaphone", branch = "rescaling", features = ["bin-3"],  default-features = false }
 colored = "1.8.0"
 rdkafka = "0.14.1"
 math="0.0.2"

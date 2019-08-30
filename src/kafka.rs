@@ -47,7 +47,7 @@ pub fn control_stream<G: Scope<Timestamp=usize>>(scope: &mut G, input_probe: Pro
 
         move |output| {
             if let Some(consumer) = &consumer {
-                if let Some(mut cap) = cap.as_mut() {
+                if let Some(cap) = cap.as_mut() {
                     activator.activate(); // we want to be re-scheduled
 
                     // Poll kafka topic for control commands

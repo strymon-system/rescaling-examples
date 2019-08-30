@@ -126,8 +126,8 @@ impl LoadBalancer {
         let mut moves = Vec::new();
 
         loop {
-            let max = self.worker2bins.iter().max_by_key(|(w, bins)| bins.len()).unwrap();
-            let min = self.worker2bins.iter().min_by_key(|(w, bins)| bins.len()).unwrap();
+            let max = self.worker2bins.iter().max_by_key(|(_w, bins)| bins.len()).unwrap();
+            let min = self.worker2bins.iter().min_by_key(|(_w, bins)| bins.len()).unwrap();
 
             let delta =  max.1.len() - min.1.len();
             if delta <= 1 { break } // we are done, work is balanced
@@ -147,6 +147,7 @@ impl LoadBalancer {
         println!("map: {:?}", map);
     }
 
+    #[allow(dead_code)]
     fn verify(&self) {
         // self.dump_map();
         // properly balanced
@@ -161,12 +162,11 @@ impl LoadBalancer {
 }
 
 mod test {
-    use crate::LoadBalancer;
 
     #[test]
     fn load_balancer_init() {
         let workers = (0..6_usize).collect::<Vec<_>>();
-        let mut lb = LoadBalancer::new(workers, 50);
+        let mut lb = crate::LoadBalancer::new(workers, 50);
         lb.dump_map();
 
         let new_workers = (6..60_usize).collect::<Vec<_>>();
