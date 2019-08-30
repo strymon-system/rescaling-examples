@@ -571,7 +571,7 @@ a (not very exciting) plot for per-tuple latencies. The experiment setup was as 
     \item two rescaling operations were performed, each time adding an additional timely process also with 2 worker threads.
 \end{itemize}
 
-The dataflow used is a simple WordCount\footnote{\verb|https://github.com/LorenzSelv/rescaling-examples/blob/master/src/bin/benchmark.rs|} program, where only a single worker samples lines and injects them into the dataflow at a rate of 100 lines per second each with 100 words in it.
+The dataflow used is a simple \verb|WordCount|\footnote{\verb|https://github.com/LorenzSelv/rescaling-examples/blob/master/src/bin/benchmark.rs|} program, where only a single worker samples lines and injects them into the dataflow at a rate of 100 lines per second each with 100 words in it.
 Lines are then distributed in a round-robin fashion among workers. The \verb|flat_map| operator splits lines by
 whitespaces and emit pairs \verb|(word, 1)|. The \verb|stateful_state_machine| function provided by Megaphone then aggregates the elements by key and counts the occurences.
 
@@ -592,8 +592,47 @@ I tried to increase the rate of the input, or the length of the lines, but I dec
 
 \section{Limitations and Future Work}
 
-* no removal of workers
-* no capabilities at all for new workers
-* formal verification of the protocol
+We now highlight what are the limitations at the current stage of development.
+
+\subsection{Removal of Workers}
+One missing, but very important feature for a fully rescalable dataflow computation, is allowing the removal of workers from
+the cluster. While the technical implementation details might not be hardest to deal with, it has a lot of
+overlapping aspects with the fault-tolerance chapter.
+
+A worker leaving the cluster is \textit{noticed} by the other remaining workers by TCP connections that have been dropped.
+At the moment, if a connection is interrupted, the computation is shut-down. Instead, one should remove
+all the endpoints pointing to that worker process and just keep going with the computation.
+
+In the code there are several places where it is assumed that the worker indices are in the range \verb|(0..peers)|,
+since this assumption would not hold anymore, all the associated data structures that rely on these indices should be turned
+into \verb|HashMap|s.
+There are also some subtle and important things one should think about, among the others:
+
+\begin{itemize}
+    \item if the worker leaving the cluster is holding capabilities and does not get the chance to discard them, the other
+        workers have no way to know that those capabilities belonged to the leaving worker, and they would stall as a result.
+    \item if the worker leaving the cluster is owning any data (e.g. is associated with some bins in the
+        routing table of Megaphone's stateful operator) this would cause some serious problems.
+        If we assume that we \textit{decide} when a worker leaves the cluster, we can first transfer state and data ownership to
+        other workers and then kill the worker.
+\end{itemize}
+
+\subsection{New worker has no capabilities}
+As already explained in a previous section, the new worker operators are not supplied with capabilities: they can only produce
+output (or setup notifications) after receiving some input (which comes with its own capabilities).
+
+While we must not issue capabilities for timestamps that have been closed already, it is safe to issue a capability for the \textit{current} timestamp \verb|t|.
+Here, \textit{current} means the local view of the bootstrap server of the frontier for each operator.
+Since this local view is a \textit{delayed} view of the global frontier, it is safe to issue a capability for such timestamp.
+Importantly, the bootstrap server should emit a progress update \verb|(t, +1)| but not the corresponding \verb|(t, -1)|,
+which should be issued by the new worker instead.
+
+As of now, the new worker cannot produce output out of thin air, which means that their \verb|source| operator are useless (and are
+actually swapped with \verb|empty| stream under the hood).
+
+\subsection{Formal verification of the protocol}
+There was some interest in formally verifying timely progress tracking protocol, but nobody ever put the effort in doing so.
+The extra complexity (hopefully not too much) introduced by the bootstrap protocol might make it worth it to have some additional
+guarantees given by a formal verification. This is not a trivial work and might make an interesting idea for a Master thesis.
 
 \end{document}
